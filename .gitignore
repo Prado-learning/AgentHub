@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+.venv/
+*.egg-info/
+node_modules/
+dist/
+.DS_Store
+agent-workspace/logs/*
+!agent-workspace/logs/.gitkeep
+agent-workspace/generated/*
+!agent-workspace/generated/.gitkeep
+agent-workspace/previews/*
+!agent-workspace/previews/.gitkeep

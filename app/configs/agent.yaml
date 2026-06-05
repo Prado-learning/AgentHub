@@ -1,0 +1,8 @@
+agents:
+  - id: orchestrator
+    name: Orchestrator
+  - id: ui_builder
+    name: UI Builder
+  - id: code_reviewer
+    name: Code Reviewer
+

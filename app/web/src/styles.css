@@ -1,0 +1,268 @@
+:root {
+  color: #142033;
+  background: #eef4f8;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  min-height: 100vh;
+  gap: 24px;
+  padding: 28px;
+}
+
+.workspace,
+.artifact-panel {
+  min-width: 0;
+}
+
+.masthead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.masthead h1,
+.artifact-panel h2 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.masthead h1 {
+  font-size: clamp(32px, 5vw, 54px);
+  line-height: 1;
+}
+
+.masthead p {
+  margin: 10px 0 0;
+  color: #5b687a;
+  font-size: 18px;
+}
+
+.status-pill,
+.artifact-panel header span {
+  border: 1px solid #84a9d9;
+  border-radius: 999px;
+  color: #0f5fbd;
+  background: #fff;
+  padding: 6px 12px;
+  font-weight: 700;
+}
+
+.agent-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.agent-item,
+.message,
+.artifact-card,
+.composer,
+.artifact-panel {
+  border: 1px solid #d7e1ee;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.agent-item {
+  padding: 14px;
+}
+
+.agent-item strong,
+.agent-item span {
+  display: block;
+}
+
+.agent-item span {
+  margin-top: 4px;
+  color: #677386;
+  font-size: 14px;
+}
+
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 360px;
+  padding: 18px;
+  border: 1px solid #c8d9ec;
+  border-radius: 8px;
+  background: #f8fbfd;
+}
+
+.empty-state {
+  display: grid;
+  place-content: center;
+  min-height: 320px;
+  text-align: center;
+  color: #687588;
+}
+
+.empty-state strong {
+  color: #172033;
+  font-size: 20px;
+}
+
+.message {
+  max-width: 76%;
+  padding: 14px 16px;
+}
+
+.message.user {
+  align-self: flex-end;
+  background: #0f5fbd;
+  color: #fff;
+}
+
+.message.agent {
+  align-self: flex-start;
+}
+
+.message-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: inherit;
+  font-weight: 700;
+}
+
+.message-meta small {
+  opacity: 0.72;
+}
+
+.message p {
+  margin: 8px 0 0;
+}
+
+.composer {
+  margin-top: 16px;
+  padding: 14px;
+}
+
+.composer textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid #cbd7e6;
+  border-radius: 8px;
+  padding: 12px;
+  color: #142033;
+  background: #fff;
+}
+
+.composer-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.composer button {
+  min-width: 112px;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 18px;
+  color: #fff;
+  background: #0f5fbd;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.composer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.error-text {
+  margin: 0;
+  color: #b42318;
+}
+
+.artifact-panel {
+  align-self: start;
+  padding: 18px;
+}
+
+.artifact-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.artifact-empty {
+  color: #687588;
+}
+
+.artifact-card {
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.artifact-card-header {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.artifact-card-header span {
+  color: #0f5fbd;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-card pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  border-radius: 8px;
+  padding: 12px;
+  color: #d8ecff;
+  background: #182536;
+  white-space: pre-wrap;
+}
+
+.artifact-card a {
+  color: #0f5fbd;
+  font-weight: 700;
+}
+
+@media (max-width: 920px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    padding: 18px;
+  }
+
+  .agent-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .message {
+    max-width: 100%;
+  }
+}
+

@@ -1,0 +1,4 @@
+provider:
+  type: mock
+  model: day1-placeholder
+
