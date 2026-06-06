@@ -1,20 +1,382 @@
-from dataclasses import dataclass, field
+from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from uuid import uuid4
+
+from agenthub_harness.adapters import AgentAdapter, AgentTask, build_agent_adapters
+from agenthub_harness.adapters.base import AgentResult
+from agenthub_harness.adapters.mock_adapter import MockAgentAdapter
+from agenthub_harness.artifacts.conflict_resolver import resolve_artifact_conflicts
 from agenthub_harness.core.context import RunContext
 from agenthub_harness.core.events import RunEvent
+from agenthub_harness.core.result import RunResult
+from agenthub_harness.runtime.orchestrator import Orchestrator, PlanStep
+from agenthub_harness.tools.executor import ToolExecutor
+from agenthub_harness.tools.schemas import ToolResult
+
+
+@dataclass(frozen=True)
+class StepExecutionResult:
+    step_id: str
+    agent_id: str
+    status: str
+    messages: list[dict] = field(default_factory=list)
+    artifacts: list[dict] = field(default_factory=list)
+    error: str | None = None
 
 
 @dataclass
 class HarnessRunner:
     mode: str = "mock"
+    adapters: dict[str, AgentAdapter] = field(default_factory=build_agent_adapters)
+    tool_executor: ToolExecutor = field(default_factory=ToolExecutor)
+    max_parallel_steps: int = 4
     events: list[RunEvent] = field(default_factory=list)
 
-    def run(self, context: RunContext) -> dict:
-        event = RunEvent(type="run.started", payload={"conversation_id": context.conversation_id})
-        self.events.append(event)
+    def run(self, context: RunContext) -> RunResult:
+        run_events = [self._record_event("run.started", {"conversation_id": context.conversation_id})]
+
+        orchestrator = Orchestrator(
+            available_agent_ids=list(self.adapters),
+            available_tool_ids=self.tool_executor.registry.list_ids(),
+        )
+        plan = orchestrator.plan(context)
+        run_events.append(
+            self._record_event(
+                "run.planned",
+                {
+                    "reason": plan.reason,
+                    "steps": [
+                        {
+                            "id": step.id,
+                            "agent_id": step.agent_id,
+                            "task": step.task,
+                            "tools": step.tools,
+                            "depends_on": step.depends_on,
+                            "can_run_parallel": step.can_run_parallel,
+                        }
+                        for step in plan.steps
+                    ],
+                },
+            )
+        )
+
+        step_results: dict[str, StepExecutionResult] = {}
+        messages: list[dict] = []
+        raw_artifacts: list[dict] = []
+        pending = {step.id: step for step in plan.steps}
+
+        while pending:
+            ready = [
+                step
+                for step in pending.values()
+                if all(dep in step_results for dep in step.depends_on)
+            ]
+            if not ready:
+                for step in pending.values():
+                    result = self._skipped_result(step, "unresolved dependencies")
+                    step_results[step.id] = result
+                    messages.extend(result.messages)
+                    run_events.append(
+                        self._record_event(
+                            "agent.skipped",
+                            {
+                                "step_id": step.id,
+                                "agent_id": step.agent_id,
+                                "reason": result.error,
+                            },
+                        )
+                    )
+                break
+
+            for step in ready:
+                pending.pop(step.id, None)
+
+            blocked = [
+                step
+                for step in ready
+                if any(step_results[dep].status != "success" for dep in step.depends_on)
+            ]
+            executable = [step for step in ready if step not in blocked]
+
+            for step in blocked:
+                result = self._skipped_result(step, "dependency failed")
+                step_results[step.id] = result
+                messages.extend(result.messages)
+                run_events.append(
+                    self._record_event(
+                        "agent.skipped",
+                        {
+                            "step_id": step.id,
+                            "agent_id": step.agent_id,
+                            "reason": result.error,
+                        },
+                    )
+                )
+
+            parallel_steps = [
+                step for step in executable if step.can_run_parallel and len(executable) > 1
+            ]
+            sequential_steps = [step for step in executable if step not in parallel_steps]
+
+            if parallel_steps:
+                for event in self._start_events(parallel_steps):
+                    run_events.append(event)
+                with ThreadPoolExecutor(
+                    max_workers=min(self.max_parallel_steps, len(parallel_steps))
+                ) as executor:
+                    futures = {
+                        executor.submit(self._execute_step, step, context, [*raw_artifacts]): step
+                        for step in parallel_steps
+                    }
+                    for future in as_completed(futures):
+                        result = future.result()
+                        step_results[result.step_id] = result
+                        messages.extend(result.messages)
+                        raw_artifacts.extend(result.artifacts)
+                        run_events.append(self._completion_event(result))
+
+            for step in sequential_steps:
+                run_events.extend(self._start_events([step]))
+                result = self._execute_step(step, context, raw_artifacts)
+                step_results[result.step_id] = result
+                messages.extend(result.messages)
+                raw_artifacts.extend(result.artifacts)
+                run_events.append(self._completion_event(result))
+
+        artifacts, conflicts = resolve_artifact_conflicts(raw_artifacts)
+        status = self._run_status(step_results)
+        run_events.append(
+            self._record_event(
+                "run.completed",
+                {
+                    "conversation_id": context.conversation_id,
+                    "agent_count": len(plan.steps),
+                    "artifact_count": len(artifacts),
+                    "conflict_count": len(conflicts),
+                    "status": status,
+                },
+            )
+        )
+        return RunResult(
+            run_id=f"run_{uuid4().hex[:12]}",
+            status=status,
+            conversation_id=context.conversation_id,
+            messages=messages,
+            artifacts=artifacts,
+            events=run_events,
+        )
+
+    def _execute_step(
+        self,
+        step: PlanStep,
+        context: RunContext,
+        prior_artifacts: list[dict],
+    ) -> StepExecutionResult:
+        adapter = self.adapters.get(step.agent_id)
+        if adapter is None:
+            return self._failed_result(step, "adapter not found")
+
+        try:
+            result = adapter.run(
+                AgentTask(agent_id=step.agent_id, instruction=step.task, tools=step.tools),
+                context,
+            )
+        except Exception as exc:
+            result = AgentResult(agent_id=step.agent_id, status="error", error=str(exc))
+
+        if result.status != "success":
+            fallback_result = self._fallback(step, context, result.error or "adapter failed")
+            if fallback_result.status == "success":
+                result = fallback_result
+
+        step_artifacts = [
+            self._stamp_artifact(artifact, step)
+            for artifact in result.artifacts
+        ]
+        try:
+            tool_artifacts = self._execute_step_tools(
+                step.tools,
+                [*prior_artifacts, *step_artifacts],
+                step,
+                context,
+            )
+        except Exception as exc:
+            return StepExecutionResult(
+                step_id=step.id,
+                agent_id=step.agent_id,
+                status="failed",
+                messages=[
+                    *result.messages,
+                    self._error_message(step.agent_id, f"Tool execution failed: {exc}"),
+                ],
+                artifacts=step_artifacts,
+                error=str(exc),
+            )
+
+        status = "success" if result.status == "success" else "failed"
+        messages = result.messages or [
+            self._error_message(step.agent_id, result.error or "Agent execution failed")
+        ]
+        return StepExecutionResult(
+            step_id=step.id,
+            agent_id=step.agent_id,
+            status=status,
+            messages=messages,
+            artifacts=[*step_artifacts, *tool_artifacts],
+            error=result.error,
+        )
+
+    def _fallback(self, step: PlanStep, context: RunContext, reason: str) -> AgentResult:
+        fallback = MockAgentAdapter(agent_id=step.agent_id, name=f"{step.agent_id} fallback")
+        result = fallback.run(
+            AgentTask(agent_id=step.agent_id, instruction=step.task, tools=step.tools),
+            context,
+        )
+        return AgentResult(
+            agent_id=step.agent_id,
+            status=result.status,
+            messages=[
+                self._error_message(
+                    step.agent_id,
+                    f"Primary adapter failed, used fallback. Reason: {reason}",
+                ),
+                *result.messages,
+            ],
+            artifacts=result.artifacts,
+        )
+
+    def _execute_step_tools(
+        self,
+        tool_ids: list[str],
+        artifacts: list[dict],
+        step: PlanStep,
+        context: RunContext,
+    ) -> list[dict]:
+        tool_artifacts: list[dict] = []
+        for tool_id in tool_ids:
+            result = self.tool_executor.execute(
+                tool_id,
+                **self._tool_kwargs_for(tool_id, artifacts, step, context),
+            )
+            tool_artifacts.append(self._stamp_artifact(self._tool_result_to_artifact(result), step))
+        return tool_artifacts
+
+    def _tool_kwargs_for(
+        self,
+        tool_id: str,
+        artifacts: list[dict],
+        step: PlanStep,
+        context: RunContext,
+    ) -> dict:
+        latest_code = self._latest_code_content(artifacts)
+        if tool_id == "ui_builder_tool":
+            return {"prompt": step.task or context.message}
+        if tool_id == "preview_tool":
+            return {
+                "title": "Generated Preview",
+                "code": latest_code or step.task or context.message,
+            }
+        if tool_id == "code_review_tool":
+            return {"code": latest_code or step.task or context.message}
+        return {"prompt": step.task or context.message}
+
+    def _latest_code_content(self, artifacts: list[dict]) -> str:
+        for artifact in reversed(artifacts):
+            if artifact.get("type") == "code":
+                return str(artifact.get("content", ""))
+        return ""
+
+    def _tool_result_to_artifact(self, result: ToolResult) -> dict:
+        artifact = {
+            "id": result.id,
+            "type": result.type,
+            "title": result.title,
+            "content": result.content,
+        }
+        if result.language:
+            artifact["language"] = result.language
+        if result.preview_url:
+            artifact["preview_url"] = result.preview_url
+        if result.preview_html:
+            artifact["preview_html"] = result.preview_html
+        return artifact
+
+    def _stamp_artifact(self, artifact: dict, step: PlanStep) -> dict:
+        stamped = {
+            **artifact,
+            "producer_agent_id": artifact.get("producer_agent_id", step.agent_id),
+            "step_id": step.id,
+        }
+        if stamped.get("type") == "code" and not stamped.get("file_path"):
+            stamped["file_path"] = stamped.get("title", "generated.tsx")
+        return stamped
+
+    def _failed_result(self, step: PlanStep, reason: str) -> StepExecutionResult:
+        return StepExecutionResult(
+            step_id=step.id,
+            agent_id=step.agent_id,
+            status="failed",
+            messages=[self._error_message(step.agent_id, reason)],
+            error=reason,
+        )
+
+    def _skipped_result(self, step: PlanStep, reason: str) -> StepExecutionResult:
+        return StepExecutionResult(
+            step_id=step.id,
+            agent_id=step.agent_id,
+            status="skipped",
+            messages=[self._error_message(step.agent_id, f"Skipped: {reason}")],
+            error=reason,
+        )
+
+    def _error_message(self, sender: str, content: str) -> dict:
         return {
-            "status": "queued",
-            "conversation_id": context.conversation_id,
-            "message": context.message,
+            "role": "agent",
+            "sender": sender,
+            "content": content,
+            "format": "markdown",
         }
 
+    def _start_events(self, steps: list[PlanStep]) -> list[RunEvent]:
+        event_type = "agent.parallel_started" if len(steps) > 1 else "agent.started"
+        return [
+            self._record_event(
+                event_type,
+                {
+                    "step_id": step.id,
+                    "agent_id": step.agent_id,
+                    "task": step.task,
+                    "depends_on": step.depends_on,
+                },
+            )
+            for step in steps
+        ]
+
+    def _completion_event(self, result: StepExecutionResult) -> RunEvent:
+        return self._record_event(
+            "agent.completed",
+            {
+                "step_id": result.step_id,
+                "agent_id": result.agent_id,
+                "status": result.status,
+                "artifact_count": len(result.artifacts),
+                "error": result.error,
+            },
+        )
+
+    def _record_event(self, event_type: str, payload: dict) -> RunEvent:
+        event = RunEvent(type=event_type, payload=payload)
+        self.events.append(event)
+        return event
+
+    def _run_status(self, results: dict[str, StepExecutionResult]) -> str:
+        if not results:
+            return "success"
+        statuses = {result.status for result in results.values()}
+        if statuses == {"success"}:
+            return "success"
+        if "success" in statuses:
+            return "partial_success"
+        return "failed"

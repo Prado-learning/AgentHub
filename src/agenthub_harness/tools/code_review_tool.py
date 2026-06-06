@@ -6,6 +6,11 @@ def code_review_tool(code: str) -> ToolResult:
         id="art_002",
         type="review",
         title="Code Review",
-        content="- 代码结构清晰\n- 建议增加空状态\n- 建议增加输入校验" if code else "- No code provided",
+        content=(
+            "- Code structure is clear\n"
+            "- Add an empty state\n"
+            "- Add input validation"
+            if code
+            else "- No code provided"
+        ),
     )
-

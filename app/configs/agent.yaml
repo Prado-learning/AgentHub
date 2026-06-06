@@ -1,8 +1,30 @@
 agents:
   - id: orchestrator
     name: Orchestrator
+    adapter: mock
+    capabilities:
+      - planning
+      - text
+  - id: codex
+    name: Codex
+    adapter: codex
+    capabilities:
+      - code
+      - refactor
+      - review
   - id: ui_builder
     name: UI Builder
+    adapter: mock
+    capabilities:
+      - code
+      - preview
+    skills:
+      - skills/ui_builder.md
   - id: code_reviewer
     name: Code Reviewer
+    adapter: mock
+    capabilities:
+      - review
+    skills:
+      - skills/code_review.md
 

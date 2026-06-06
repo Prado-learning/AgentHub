@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
-from app.api.services.artifact_service import get_artifact, get_preview_html
+from app.api.services.artifact_service import get_artifact, get_preview_html, list_artifacts
 
 
 router = APIRouter(tags=["artifacts"])
@@ -13,6 +13,11 @@ def read_artifact(artifact_id: str) -> dict:
     if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     return artifact
+
+
+@router.get("/conversations/{conversation_id}/artifacts")
+def read_conversation_artifacts(conversation_id: str) -> dict[str, list[dict]]:
+    return {"artifacts": list_artifacts(conversation_id)}
 
 
 @router.get("/artifacts/{artifact_id}/preview", response_class=HTMLResponse)

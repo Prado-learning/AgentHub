@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import agents, artifacts, chat
+from app.api.routers import agents, artifacts, chat, conversations
 
 
 app = FastAPI(title="AgentHub Demo API", version="0.1.0")
@@ -20,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(chat.router)
+app.include_router(conversations.router)
 app.include_router(agents.router)
 app.include_router(artifacts.router)
 

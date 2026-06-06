@@ -1,6 +1,10 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.api.main import app
+from app.api.services import conversation_service
+from app.api.services.conversation_store import JsonStore
 
 
 client = TestClient(app)
@@ -13,7 +17,22 @@ def test_health() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_chat_returns_mock_agents_and_artifacts() -> None:
+def test_chat_returns_runner_agents_artifacts_and_persists_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ENABLE_REAL_LLM", "false")
+    monkeypatch.setattr(
+        conversation_service,
+        "CONVERSATIONS",
+        JsonStore(tmp_path / "conversations.json"),
+    )
+    monkeypatch.setattr(
+        conversation_service,
+        "MESSAGES",
+        JsonStore(tmp_path / "messages.json"),
+    )
+
     response = client.post(
         "/chat",
         json={
@@ -30,8 +49,15 @@ def test_chat_returns_mock_agents_and_artifacts() -> None:
     data = response.json()
     assert response.status_code == 200
     assert data["status"] == "success"
-    assert len(data["messages"]) == 3
+    assert len(data["messages"]) == 2
     assert len(data["artifacts"]) == 3
+
+    history_response = client.get("/conversations/conv_demo/messages")
+    history = history_response.json()["messages"]
+    assert history_response.status_code == 200
+    assert len(history) == 3
+    assert history[0]["role"] == "user"
+    assert history[-1]["sender"] == "code_reviewer"
 
 
 def test_agents_endpoint() -> None:
@@ -40,6 +66,7 @@ def test_agents_endpoint() -> None:
     assert response.status_code == 200
     assert [agent["id"] for agent in response.json()["agents"]] == [
         "orchestrator",
+        "codex",
         "ui_builder",
         "code_reviewer",
     ]
