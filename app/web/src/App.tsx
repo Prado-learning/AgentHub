@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, PointerEvent, ReactNode, useEffect, useMemo, useState } from "react";
 
 import {
   API_BASE_URL,
@@ -155,6 +155,8 @@ const copy = {
 
 const defaultAgentIds = ["orchestrator", "codex", "ui_builder", "code_reviewer"];
 const initialPrompt = "帮我生成一个现代 Todo List 页面，并给出代码审查建议";
+const minSidebarWidth = 240;
+const maxSidebarWidth = 420;
 
 function App() {
   const [language, setLanguage] = useState<Language>("zh");
@@ -176,6 +178,7 @@ function App() {
   const [draftTitle, setDraftTitle] = useState("");
   const [draftMode, setDraftMode] = useState<ConversationMode>("group");
   const [draftAgentIds, setDraftAgentIds] = useState<string[]>(defaultAgentIds);
+  const [sidebarWidth, setSidebarWidth] = useState(304);
 
   const t = copy[language];
 
@@ -435,11 +438,31 @@ function App() {
     }
   }
 
+  function handleSidebarResizeStart(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+
+    function handlePointerMove(moveEvent: globalThis.PointerEvent) {
+      const nextWidth = Math.min(maxSidebarWidth, Math.max(minSidebarWidth, moveEvent.clientX - 18));
+      setSidebarWidth(nextWidth);
+    }
+
+    function handlePointerUp() {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+  }
+
   const hasInlinePreview = Boolean(inlinePreviewArtifact);
   const shouldShowPreviewPanel = hasInlinePreview && isPreviewOpen;
 
   return (
-    <main className={`app-shell ${shouldShowPreviewPanel ? "has-preview" : "no-preview"}`}>
+    <main
+      className={`app-shell ${shouldShowPreviewPanel ? "has-preview" : "no-preview"}`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
       <section className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark">AH</div>
@@ -584,6 +607,13 @@ function App() {
           )}
         </section>
       </aside>
+
+      <button
+        aria-label="调整左侧栏宽度"
+        className="sidebar-resizer"
+        type="button"
+        onPointerDown={handleSidebarResizeStart}
+      />
 
       <section className="workspace">
         <header className="conversation-summary">
