@@ -1,0 +1,18 @@
+models:
+  - id: auto
+    name: Auto
+    provider: auto
+    env_prefix: ""
+  - id: stepfun
+    name: StepFun
+    provider: openai_compatible
+    env_prefix: STEPFUN
+    fallback_env_prefix: OPENAI
+  - id: deepseek
+    name: DeepSeek
+    provider: openai_compatible
+    env_prefix: DEEPSEEK
+  - id: doubao
+    name: Doubao
+    provider: openai_compatible
+    env_prefix: DOUBAO

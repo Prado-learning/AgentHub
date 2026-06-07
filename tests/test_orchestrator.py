@@ -71,6 +71,28 @@ def test_orchestrator_uses_single_selected_agent_in_single_mode() -> None:
     assert [step.agent_id for step in plan.steps] == ["code_reviewer"]
 
 
+def test_single_vision_agent_keeps_default_image_tool() -> None:
+    plan = Orchestrator().plan(
+        RunContext(
+            conversation_id="conv_demo",
+            message="Analyze this image",
+            history=[],
+            selected_agents=["vision_agent"],
+            mode="single",
+            attachments=[
+                {
+                    "id": "att_img",
+                    "type": "image",
+                    "mime_type": "image/png",
+                }
+            ],
+        )
+    )
+
+    assert [step.agent_id for step in plan.steps] == ["vision_agent"]
+    assert plan.steps[0].tools == ["image_reader_tool"]
+
+
 def test_orchestrator_explicit_multiple_agents_can_run_in_parallel() -> None:
     plan = Orchestrator().plan(
         RunContext(

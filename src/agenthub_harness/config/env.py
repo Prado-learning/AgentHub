@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 
-def load_env_file(path: str | Path = ".env") -> None:
+def load_env_file(path: str | Path = ".env", override: bool = False) -> None:
     env_path = Path(path)
     if not env_path.exists():
         return
@@ -14,7 +14,9 @@ def load_env_file(path: str | Path = ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        env_key = key.strip()
+        if override or env_key not in os.environ:
+            os.environ[env_key] = value.strip().strip('"').strip("'")
 
 
 def env_flag(name: str, default: bool = False) -> bool:

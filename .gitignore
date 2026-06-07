@@ -15,4 +15,6 @@ agent-workspace/generated/*
 !agent-workspace/generated/.gitkeep
 agent-workspace/previews/*
 !agent-workspace/previews/.gitkeep
+agent-workspace/uploads/*
+!agent-workspace/uploads/.gitkeep
 agent-workspace/runtime/

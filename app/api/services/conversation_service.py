@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -148,6 +149,7 @@ def add_message(
     format: str = "markdown",
     artifact_ids: list[str] | None = None,
     quoted_message_id: str | None = None,
+    attachment_ids: list[str] | None = None,
 ) -> dict:
     ensure_default_conversation()
     now = utc_now()
@@ -160,6 +162,8 @@ def add_message(
         "format": format,
         "artifact_ids": artifact_ids or [],
         "quoted_message_id": quoted_message_id,
+        "attachment_ids": attachment_ids or [],
+        "is_pinned": False,
         "created_at": now,
     }
     messages = MESSAGES.read()
@@ -199,7 +203,42 @@ def _touch_conversation(conversation_id: str, last_message: str, updated_at: str
     conversations = CONVERSATIONS.read()
     for conversation in conversations:
         if conversation.get("id") == conversation_id:
-            conversation["last_message"] = last_message
+            conversation["last_message"] = _summarize_message(last_message)
             conversation["updated_at"] = updated_at
             CONVERSATIONS.write(conversations)
             return
+
+
+def set_message_pinned(
+    conversation_id: str,
+    message_id: str,
+    is_pinned: bool,
+) -> dict | None:
+    ensure_default_conversation()
+    messages = MESSAGES.read()
+    for message in messages:
+        if (
+            message.get("conversation_id") == conversation_id
+            and message.get("id") == message_id
+        ):
+            message["is_pinned"] = is_pinned
+            MESSAGES.write(messages)
+            return message
+    return None
+
+
+def list_pinned_messages(conversation_id: str) -> list[dict]:
+    return [
+        message
+        for message in list_messages(conversation_id)
+        if bool(message.get("is_pinned"))
+    ]
+
+
+def _summarize_message(content: str, limit: int = 96) -> str:
+    text = re.sub(r"```[\s\S]*?```", " code block ", content)
+    text = re.sub(r"[*_#>`~-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."

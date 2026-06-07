@@ -83,6 +83,20 @@ def get_artifact(artifact_id: str) -> dict | None:
     return MOCK_ARTIFACTS.get(artifact_id)
 
 
+def update_artifact(artifact_id: str, updates: dict) -> dict | None:
+    records = ARTIFACTS.read()
+    for artifact in records:
+        if artifact.get("id") != artifact_id:
+            continue
+        artifact.update(updates)
+        ARTIFACTS.write(records)
+        return _public_artifact(artifact)
+    if artifact_id in MOCK_ARTIFACTS:
+        MOCK_ARTIFACTS[artifact_id].update(updates)
+        return MOCK_ARTIFACTS[artifact_id]
+    return None
+
+
 def get_preview_html(artifact_id: str) -> str | None:
     for artifact in ARTIFACTS.read():
         if artifact.get("id") == artifact_id and artifact.get("type") == "preview":

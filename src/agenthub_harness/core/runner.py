@@ -280,6 +280,10 @@ class HarnessRunner:
             }
         if tool_id == "code_review_tool":
             return {"code": latest_code or step.task or context.message}
+        if tool_id == "file_reader_tool":
+            return {"attachments": context.attachments or []}
+        if tool_id == "image_reader_tool":
+            return {"attachments": context.attachments or []}
         return {"prompt": step.task or context.message}
 
     def _latest_code_content(self, artifacts: list[dict]) -> str:

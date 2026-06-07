@@ -1,5 +1,17 @@
 tools:
   - id: ui_builder_tool
+    name: UI Builder Tool
+    description: Generates simple UI code artifacts.
   - id: code_review_tool
+    name: Code Review Tool
+    description: Reviews code artifacts.
   - id: preview_tool
+    name: Preview Tool
+    description: Renders generated UI into an HTML preview.
+  - id: file_reader_tool
+    name: File Reader Tool
+    description: Reads uploaded text-like files and returns extracted content.
+  - id: image_reader_tool
+    name: Image Reader Tool
+    description: Summarizes uploaded images for agents that cannot directly see images.
 

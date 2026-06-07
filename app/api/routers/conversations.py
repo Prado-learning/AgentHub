@@ -8,8 +8,10 @@ from app.api.services.conversation_service import (
     get_conversation,
     list_conversations,
     list_messages,
+    list_pinned_messages,
     set_conversation_archived,
     set_conversation_pinned,
+    set_message_pinned,
     update_conversation,
 )
 
@@ -100,3 +102,25 @@ def read_conversation_messages(conversation_id: str) -> dict[str, list[dict]]:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"messages": list_messages(conversation_id)}
 
+
+@router.get("/conversations/{conversation_id}/pinned-messages")
+def read_pinned_messages(conversation_id: str) -> dict[str, list[dict]]:
+    if get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"messages": list_pinned_messages(conversation_id)}
+
+
+@router.patch("/conversations/{conversation_id}/messages/{message_id}/pin")
+def pin_message(conversation_id: str, message_id: str) -> dict:
+    message = set_message_pinned(conversation_id, message_id, True)
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"message": message}
+
+
+@router.patch("/conversations/{conversation_id}/messages/{message_id}/unpin")
+def unpin_message(conversation_id: str, message_id: str) -> dict:
+    message = set_message_pinned(conversation_id, message_id, False)
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"message": message}

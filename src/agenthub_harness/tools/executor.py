@@ -2,7 +2,13 @@ from collections.abc import Callable
 from typing import Any
 
 from agenthub_harness.registry.tool_registry import ToolRegistry
-from agenthub_harness.tools import code_review_tool, preview_tool, ui_builder_tool
+from agenthub_harness.tools import (
+    code_review_tool,
+    file_reader_tool,
+    image_reader_tool,
+    preview_tool,
+    ui_builder_tool,
+)
 from agenthub_harness.tools.schemas import ToolResult
 
 
@@ -26,4 +32,6 @@ def build_default_tool_registry() -> ToolRegistry:
     registry.register("ui_builder_tool", ui_builder_tool)
     registry.register("code_review_tool", code_review_tool)
     registry.register("preview_tool", preview_tool)
+    registry.register("file_reader_tool", file_reader_tool)
+    registry.register("image_reader_tool", image_reader_tool)
     return registry

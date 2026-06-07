@@ -69,6 +69,20 @@ def test_agents_endpoint() -> None:
         "codex",
         "ui_builder",
         "code_reviewer",
+        "vision_agent",
+        "file_analyst",
+    ]
+
+
+def test_models_endpoint() -> None:
+    response = client.get("/models")
+
+    assert response.status_code == 200
+    assert [model["id"] for model in response.json()["models"]] == [
+        "auto",
+        "stepfun",
+        "deepseek",
+        "doubao",
     ]
 
 

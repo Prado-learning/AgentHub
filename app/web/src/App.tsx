@@ -1,258 +1,187 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 
 import {
+  applyArtifactDiff,
   archiveConversation,
   createConversation,
   getAgents,
   getConversationArtifacts,
+  getConversationAttachments,
   getConversationMessages,
   getConversations,
+  getModels,
+  getTools,
   pinConversation,
+  pinMessage,
   regenerateChatMessage,
   sendChatMessage,
   unarchiveConversation,
   unpinConversation,
+  unpinMessage,
+  uploadAttachment,
 } from "./api";
-import type { Agent, Artifact, ChatMessage, Conversation, ConversationMode } from "./types";
+import type {
+  Agent,
+  Artifact,
+  Attachment,
+  ChatMessage,
+  ChatResponse,
+  Conversation,
+  ConversationMode,
+  ModelOption,
+  ToolOption,
+  ToolPreferences,
+} from "./types";
 
-type Language = "zh" | "en";
-
-const copy = {
-  zh: {
-    appName: "AgentHub",
-    appTagline: "多 Agent 协作工作台",
-    heroTitle: "用聊天驱动 Agent 协作、产物生成与预览",
-    heroSubtitle: "统一调度 Orchestrator、UI Builder、Code Reviewer 和工具链，沉淀每一次会话上下文。",
-    language: "语言",
-    active: "活跃",
-    archived: "归档",
-    conversations: "会话",
-    newConversation: "新建",
-    createConversation: "创建会话",
-    cancel: "取消",
-    title: "标题",
-    chatMode: "会话模式",
-    singleChat: "单聊",
-    groupChat: "群聊",
-    chooseAgent: "选择 Agent",
-    search: "搜索会话...",
-    showActive: "查看活跃",
-    showArchived: "查看归档",
-    pinned: "置顶",
-    noMessages: "暂无消息",
-    pin: "置顶",
-    unpin: "取消置顶",
-    archive: "归档",
-    restore: "恢复",
-    agentsOnline: "Agents",
-    artifacts: "产物",
-    context: "上下文",
-    mode: "模式",
-    noConversation: "暂无会话",
-    emptyTitle: "选择或新建一个会话",
-    emptySubtitle: "输入任务后，AgentHub 会根据规则分派 Agent 和 Tool 并生成产物。",
-    quote: "引用",
-    quoted: "正在引用",
-    clear: "清除",
-    composerPlaceholder: "告诉 AgentHub 你想构建、审查、预览或调用哪个 @tool...",
-    regenerate: "重新生成",
-    send: "发送",
-    sending: "发送中...",
-    generatedArtifacts: "生成的代码、审查、预览和冲突卡片会显示在这里。",
-    copy: "复制",
-    expandPreview: "展开预览",
-    openPreview: "打开预览",
-    close: "关闭",
-    preview: "预览",
-    user: "你",
-    statusReady: "已就绪",
-    statusRunning: "运行中",
-    selectedAgents: "参与 Agent",
-    createError: "创建会话失败",
-    loadAgentsError: "Agent 列表加载失败",
-    loadConversationsError: "会话加载失败",
-    loadMessagesError: "消息加载失败",
-    loadArtifactsError: "产物加载失败",
-    pinError: "置顶状态更新失败",
-    archiveError: "归档状态更新失败",
-    sendError: "发送失败",
-    regenerateError: "重新生成失败",
-    noUserMessage: "没有可重新生成的用户消息。",
-  },
-  en: {
-    appName: "AgentHub",
-    appTagline: "Multi-agent collaboration workspace",
-    heroTitle: "Chat with agents to build, review, and preview artifacts",
-    heroSubtitle: "Coordinate Orchestrator, UI Builder, Code Reviewer, and tools with persistent context.",
-    language: "Language",
-    active: "Active",
-    archived: "Archived",
-    conversations: "Conversations",
-    newConversation: "New",
-    createConversation: "Create conversation",
-    cancel: "Cancel",
-    title: "Title",
-    chatMode: "Chat mode",
-    singleChat: "Single",
-    groupChat: "Group",
-    chooseAgent: "Choose Agent",
-    search: "Search conversations...",
-    showActive: "Show active",
-    showArchived: "Show archived",
-    pinned: "Pinned",
-    noMessages: "No messages yet",
-    pin: "Pin",
-    unpin: "Unpin",
-    archive: "Archive",
-    restore: "Restore",
-    agentsOnline: "Agents",
-    artifacts: "Artifacts",
-    context: "Context",
-    mode: "Mode",
-    noConversation: "No conversation",
-    emptyTitle: "Select or create a conversation",
-    emptySubtitle: "Send a task and AgentHub will dispatch agents, tools, and artifacts.",
-    quote: "Quote",
-    quoted: "Quoting",
-    clear: "Clear",
-    composerPlaceholder: "Tell AgentHub what to build, review, preview, or which @tool to call...",
-    regenerate: "Regenerate",
-    send: "Send",
-    sending: "Sending...",
-    generatedArtifacts: "Generated code, reviews, previews, and conflict cards will appear here.",
-    copy: "Copy",
-    expandPreview: "Expand preview",
-    openPreview: "Open preview",
-    close: "Close",
-    preview: "Preview",
-    user: "You",
-    statusReady: "Ready",
-    statusRunning: "Running",
-    selectedAgents: "Selected agents",
-    createError: "Create conversation failed",
-    loadAgentsError: "Agent list load failed",
-    loadConversationsError: "Conversation load failed",
-    loadMessagesError: "Message load failed",
-    loadArtifactsError: "Artifact load failed",
-    pinError: "Pin update failed",
-    archiveError: "Archive update failed",
-    sendError: "Send failed",
-    regenerateError: "Regenerate failed",
-    noUserMessage: "No user message to regenerate.",
-  },
-} satisfies Record<Language, Record<string, string>>;
-
+const API_ORIGIN = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const defaultAgentIds = ["orchestrator", "codex", "ui_builder", "code_reviewer"];
-const initialPrompt = "帮我生成一个现代 Todo List 页面，并给出代码审查建议";
+const defaultToolPreferences: ToolPreferences = {
+  file: true,
+  image: true,
+  preview: true,
+  diff: false,
+};
+
+type RightPanelTab = "artifacts" | "agents" | "tools" | "context";
+type ProgressStep = {
+  id: string;
+  label: string;
+  detail?: string;
+  status: "pending" | "active" | "done" | "error";
+};
+
+const labels = {
+  appTagline: "多 Agent 协作工作台",
+  ready: "已就绪",
+  running: "运行中",
+  active: "活跃",
+  archived: "归档",
+  conversations: "会话",
+  new: "新建",
+  search: "搜索会话...",
+  showArchived: "查看归档",
+  showActive: "查看活跃",
+  pin: "置顶",
+  unpin: "取消置顶",
+  archive: "归档",
+  restore: "恢复",
+  title: "标题",
+  single: "单 Agent",
+  multi: "多 Agent",
+  chooseAgent: "选择 Agent",
+  cancel: "取消",
+  create: "创建",
+  emptyTitle: "选择或新建一个会话",
+  placeholder: "告诉 AgentHub 你想构建、审查、预览或调用哪个 @tool...",
+  send: "发送",
+  sending: "执行中",
+  regenerate: "重新生成",
+  quote: "引用",
+  quoted: "正在引用",
+  clear: "清除",
+  pinMessage: "Pin",
+  unpinMessage: "Unpin",
+  upload: "上传",
+  pendingFiles: "待发送附件",
+  artifacts: "产物",
+  agents: "Agents",
+  tools: "Tools",
+  context: "Context",
+  copy: "复制",
+  preview: "预览",
+  close: "关闭",
+  applyDiff: "应用 Diff",
+  applied: "已应用",
+  copied: "复制成功",
+  uploadSuccess: "上传成功",
+  noMessages: "暂无消息",
+  noArtifacts: "代码、预览、文件读取结果和 Diff 会显示在这里。",
+  noUserMessage: "没有可重新生成的用户消息。",
+  progress: "执行进度",
+  model: "模型",
+  agentMode: "模式",
+  toolSwitches: "工具",
+  collapse: "收起",
+  expand: "展开",
+};
 
 function App() {
-  const [language, setLanguage] = useState<Language>("zh");
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [tools, setTools] = useState<ToolOption[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState("auto");
+  const [agentMode, setAgentMode] = useState<"single" | "multi">("single");
+  const [toolPreferences, setToolPreferences] = useState<ToolPreferences>(defaultToolPreferences);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
-  const [conversationSearch, setConversationSearch] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [quotedMessage, setQuotedMessage] = useState<ChatMessage | null>(null);
-  const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
-  const [input, setInput] = useState(initialPrompt);
-  const [error, setError] = useState("");
-  const [isSending, setIsSending] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [conversationSearch, setConversationSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
-  const [draftMode, setDraftMode] = useState<ConversationMode>("group");
-  const [draftAgentIds, setDraftAgentIds] = useState<string[]>(defaultAgentIds);
+  const [draftMode, setDraftMode] = useState<ConversationMode>("single");
+  const [draftAgentIds, setDraftAgentIds] = useState<string[]>(["orchestrator"]);
+  const [quotedMessage, setQuotedMessage] = useState<ChatMessage | null>(null);
+  const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
+  const [input, setInput] = useState("请你说一下这个图片给与一种什么感觉");
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [rightTab, setRightTab] = useState<RightPanelTab>("artifacts");
+  const [activeNav, setActiveNav] = useState("chat");
 
-  const t = copy[language];
+  const activeConversation = conversations.find((item) => item.id === activeConversationId);
+  const selectedAgentIds = activeConversation?.agent_ids.length
+    ? activeConversation.agent_ids
+    : draftAgentIds;
+  const attachmentMap = useMemo(
+    () => new Map(attachments.map((attachment) => [attachment.id, attachment])),
+    [attachments],
+  );
+  const pinnedMessages = messages.filter((message) => message.is_pinned);
 
   useEffect(() => {
-    getAgents()
-      .then(setAgents)
-      .catch((err: Error) => setError(`${t.loadAgentsError}: ${err.message}`));
-  }, [t.loadAgentsError]);
+    getAgents().then(setAgents).catch((err: Error) => setError(err.message));
+    getModels()
+      .then((items) => setModels(items.length ? items : [{ id: "auto", name: "Auto", provider: "auto" }]))
+      .catch((err: Error) => setError(err.message));
+    getTools().then(setTools).catch((err: Error) => setError(err.message));
+  }, []);
 
   useEffect(() => {
-    let shouldIgnore = false;
+    if (!toast) {
+      return;
+    }
+    const timer = window.setTimeout(() => setToast(""), 1800);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
-    getConversations({ search: conversationSearch, archived: showArchived })
-      .then((items) => {
-        if (shouldIgnore) {
-          return;
-        }
-        setConversations(items);
-        setActiveConversationId((current) => {
-          if (current && items.some((item) => item.id === current)) {
-            return current;
-          }
-          return items[0]?.id ?? "";
-        });
-      })
-      .catch((err: Error) => setError(`${t.loadConversationsError}: ${err.message}`));
-
-    return () => {
-      shouldIgnore = true;
-    };
-  }, [conversationSearch, showArchived, t.loadConversationsError]);
+  useEffect(() => {
+    reloadConversations();
+  }, [conversationSearch, showArchived]);
 
   useEffect(() => {
     if (!activeConversationId) {
       setMessages([]);
-      return;
-    }
-
-    let shouldIgnore = false;
-    getConversationMessages(activeConversationId)
-      .then((items) => {
-        if (!shouldIgnore) {
-          setMessages(items);
-        }
-      })
-      .catch((err: Error) => setError(`${t.loadMessagesError}: ${err.message}`));
-
-    return () => {
-      shouldIgnore = true;
-    };
-  }, [activeConversationId, t.loadMessagesError]);
-
-  useEffect(() => {
-    if (!activeConversationId) {
       setArtifacts([]);
+      setAttachments([]);
       return;
     }
-
-    let shouldIgnore = false;
-    getConversationArtifacts(activeConversationId)
-      .then((items) => {
-        if (!shouldIgnore) {
-          setArtifacts(items);
-        }
-      })
-      .catch((err: Error) => setError(`${t.loadArtifactsError}: ${err.message}`));
-
-    return () => {
-      shouldIgnore = true;
-    };
-  }, [activeConversationId, t.loadArtifactsError]);
-
-  const activeConversation = useMemo(
-    () => conversations.find((conversation) => conversation.id === activeConversationId),
-    [activeConversationId, conversations],
-  );
-  const canSend = useMemo(
-    () => input.trim().length > 0 && !isSending && Boolean(activeConversation),
-    [activeConversation, input, isSending],
-  );
-  const hasArtifacts = artifacts.length > 0;
+    reloadConversationDetail(activeConversationId);
+  }, [activeConversationId]);
 
   async function reloadConversations(preferredId?: string) {
     const items = await getConversations({ search: conversationSearch, archived: showArchived });
     setConversations(items);
-    if (preferredId && items.some((item) => item.id === preferredId)) {
-      setActiveConversationId(preferredId);
-      return;
-    }
     setActiveConversationId((current) => {
+      if (preferredId && items.some((item) => item.id === preferredId)) {
+        return preferredId;
+      }
       if (current && items.some((item) => item.id === current)) {
         return current;
       }
@@ -260,16 +189,22 @@ function App() {
     });
   }
 
-  function openCreatePanel() {
-    setDraftTitle(language === "zh" ? "新会话" : "New Conversation");
-    setDraftMode("group");
-    setDraftAgentIds(defaultAgentIds);
-    setIsCreateOpen(true);
+  async function reloadConversationDetail(conversationId: string) {
+    const [nextMessages, nextArtifacts, nextAttachments] = await Promise.all([
+      getConversationMessages(conversationId),
+      getConversationArtifacts(conversationId),
+      getConversationAttachments(conversationId),
+    ]);
+    setMessages(nextMessages);
+    setArtifacts(nextArtifacts);
+    setAttachments(nextAttachments);
   }
 
-  function handleDraftModeChange(mode: ConversationMode) {
-    setDraftMode(mode);
-    setDraftAgentIds(mode === "single" ? [draftAgentIds[0] ?? "orchestrator"] : defaultAgentIds);
+  function openCreatePanel() {
+    setDraftTitle("新会话");
+    setDraftMode(agentMode === "multi" ? "group" : "single");
+    setDraftAgentIds(agentMode === "multi" ? defaultAgentIds : ["orchestrator"]);
+    setIsCreateOpen(true);
   }
 
   function toggleDraftAgent(agentId: string) {
@@ -288,87 +223,108 @@ function App() {
 
   async function handleCreateConversation(event: FormEvent) {
     event.preventDefault();
-    try {
-      const conversation = await createConversation({
-        title: draftTitle.trim() || (language === "zh" ? "新会话" : "New Conversation"),
-        mode: draftMode,
-        agent_ids: draftMode === "single" ? [draftAgentIds[0] ?? "orchestrator"] : draftAgentIds,
-      });
-      setIsCreateOpen(false);
+    const conversation = await createConversation({
+      title: draftTitle.trim() || "新会话",
+      mode: draftMode,
+      agent_ids: draftMode === "single" ? [draftAgentIds[0] ?? "orchestrator"] : draftAgentIds,
+    });
+    setIsCreateOpen(false);
+    setShowArchived(false);
+    setConversationSearch("");
+    await reloadConversations(conversation.id);
+  }
+
+  async function handleConversationPin(conversation: Conversation) {
+    if (conversation.is_pinned) {
+      await unpinConversation(conversation.id);
+    } else {
+      await pinConversation(conversation.id);
+    }
+    await reloadConversations(conversation.id);
+  }
+
+  async function handleArchive(conversation: Conversation) {
+    if (conversation.is_archived) {
+      await unarchiveConversation(conversation.id);
       setShowArchived(false);
-      setConversationSearch("");
-      await reloadConversations(conversation.id);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(`${t.createError}: ${message}`);
+    } else {
+      await archiveConversation(conversation.id);
     }
+    await reloadConversations();
   }
 
-  async function handlePinConversation(conversation: Conversation) {
-    try {
-      if (conversation.is_pinned) {
-        await unpinConversation(conversation.id);
-      } else {
-        await pinConversation(conversation.id);
-      }
-      await reloadConversations(conversation.id);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(`${t.pinError}: ${message}`);
+  async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
+    if (!activeConversation || !event.target.files?.length) {
+      return;
     }
-  }
-
-  async function handleArchiveConversation(conversation: Conversation) {
+    setError("");
     try {
-      if (conversation.is_archived) {
-        await unarchiveConversation(conversation.id);
-        setShowArchived(false);
-      } else {
-        await archiveConversation(conversation.id);
-      }
-      await reloadConversations();
+      const uploaded = await Promise.all(
+        Array.from(event.target.files).map(async (file) => {
+          const preparedFile = file.type.startsWith("image/")
+            ? await compressImageFile(file)
+            : file;
+          const contentBase64 = await fileToBase64(preparedFile);
+          return uploadAttachment(activeConversation.id, {
+            filename: preparedFile.name,
+            mime_type: preparedFile.type || undefined,
+            content_base64: contentBase64,
+          });
+        }),
+      );
+      setAttachments((current) => [...current, ...uploaded]);
+      setPendingAttachments((current) => [...current, ...uploaded]);
+      setToast(labels.uploadSuccess);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(`${t.archiveError}: ${message}`);
+      setError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      event.target.value = "";
     }
   }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     const content = input.trim();
-    if (!content || isSending || !activeConversation) {
+    if (!content || !activeConversation || isSending) {
       return;
     }
 
-    const userMessage: ChatMessage = {
-      id: `user_${Date.now()}`,
+    const attachmentIds = pendingAttachments.map((attachment) => attachment.id);
+    const optimisticMessage: ChatMessage = {
+      id: `local_${Date.now()}`,
       conversation_id: activeConversation.id,
       role: "user",
       sender: "you",
       content,
       format: "markdown",
       quoted_message_id: quotedMessage?.id,
+      attachment_ids: attachmentIds,
     };
 
-    setMessages((current) => [...current, userMessage]);
+    setMessages((current) => [...current, optimisticMessage]);
     setInput("");
-    setError("");
     setIsSending(true);
-
+    setError("");
+    setProgressSteps(initialProgressSteps(selectedModelId, attachmentIds.length));
     try {
       const response = await sendChatMessage(
         content,
         activeConversation.id,
-        activeConversation.agent_ids,
+        selectedAgentIds,
         quotedMessage?.id,
+        attachmentIds,
+        selectedModelId,
+        undefined,
+        agentMode,
+        toolPreferences,
       );
-      setMessages((current) => [...current, ...response.messages]);
-      setArtifacts((current) => [...current, ...response.artifacts]);
+      applyChatResponse(response);
+      setPendingAttachments([]);
       setQuotedMessage(null);
       await reloadConversations(activeConversation.id);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(`${t.sendError}: ${message}`);
+      setProgressSteps((current) => markProgressError(current, err instanceof Error ? err.message : "Send failed"));
+      setError(err instanceof Error ? err.message : "Send failed");
     } finally {
       setIsSending(false);
     }
@@ -380,405 +336,563 @@ function App() {
     }
     const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
     if (!lastUserMessage) {
-      setError(t.noUserMessage);
+      setError(labels.noUserMessage);
       return;
     }
-
-    setError("");
     setIsSending(true);
+    setProgressSteps(initialProgressSteps(selectedModelId, lastUserMessage.attachment_ids?.length ?? 0));
     try {
       const response = await regenerateChatMessage(
         lastUserMessage.content,
         activeConversation.id,
-        activeConversation.agent_ids,
+        selectedAgentIds,
+        selectedModelId,
+        undefined,
+        agentMode,
+        toolPreferences,
       );
-      setMessages((current) => [...current, ...response.messages]);
-      setArtifacts((current) => [...current, ...response.artifacts]);
+      applyChatResponse(response);
       await reloadConversations(activeConversation.id);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setError(`${t.regenerateError}: ${message}`);
+      setProgressSteps((current) => markProgressError(current, err instanceof Error ? err.message : "Regenerate failed"));
+      setError(err instanceof Error ? err.message : "Regenerate failed");
     } finally {
       setIsSending(false);
     }
   }
 
-  return (
-    <main className="app-shell">
-      <section className="topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark">AH</div>
-          <div>
-            <strong>{t.appName}</strong>
-            <span>{t.appTagline}</span>
-          </div>
-        </div>
-        <div className="topbar-actions">
-          <span className={`live-dot ${isSending ? "running" : ""}`}>
-            {isSending ? t.statusRunning : t.statusReady}
-          </span>
-          <label className="language-switch">
-            <span>{t.language}</span>
-            <select value={language} onChange={(event) => setLanguage(event.target.value as Language)}>
-              <option value="zh">中文</option>
-              <option value="en">English</option>
-            </select>
-          </label>
-        </div>
-      </section>
+  function applyChatResponse(response: ChatResponse) {
+    setMessages((current) => [...current, ...response.messages]);
+    setArtifacts((current) => [...current, ...response.artifacts]);
+    setProgressSteps(progressFromEvents(response.events ?? []));
+  }
 
-      <aside className="conversation-sidebar" aria-label={t.conversations}>
-        <header className="panel-header">
-          <div>
-            <span className="eyebrow">{showArchived ? t.archived : t.active}</span>
-            <h2>{t.conversations}</h2>
-          </div>
-          <button className="primary-mini" type="button" onClick={openCreatePanel}>
-            {t.newConversation}
+  async function handleMessagePin(message: ChatMessage) {
+    if (!activeConversation) {
+      return;
+    }
+    const updated = message.is_pinned
+      ? await unpinMessage(activeConversation.id, message.id)
+      : await pinMessage(activeConversation.id, message.id);
+    setMessages((current) =>
+      current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+    );
+  }
+
+  async function handleApplyDiff(artifact: Artifact) {
+    try {
+      await applyArtifactDiff(artifact.id);
+      setArtifacts((current) =>
+        current.map((item) => (item.id === artifact.id ? { ...item, status: "applied" } : item)),
+      );
+      setToast("Diff 已应用");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Apply diff failed");
+    }
+  }
+
+  function toggleToolPreference(key: keyof ToolPreferences) {
+    setToolPreferences((current) => ({ ...current, [key]: !current[key] }));
+  }
+
+  return (
+    <main className={`app-shell ${rightPanelOpen ? "with-right-panel" : "right-panel-collapsed"}`}>
+      <nav className="rail">
+        <div className="rail-logo">AH</div>
+        {[
+          ["chat", "对话", "●"],
+          ["agents", "Agents", "◎"],
+          ["tools", "Tools", "◇"],
+          ["artifacts", "产物", "▣"],
+          ["settings", "设置", "⚙"],
+        ].map(([id, label, icon]) => (
+          <button
+            className={activeNav === id ? "active" : ""}
+            key={id}
+            title={label}
+            type="button"
+            onClick={() => {
+              setActiveNav(id);
+              if (id === "agents" || id === "tools" || id === "artifacts") {
+                setRightPanelOpen(true);
+                setRightTab(id === "agents" ? "agents" : id === "tools" ? "tools" : "artifacts");
+              }
+            }}
+          >
+            {icon}
           </button>
-        </header>
+        ))}
+      </nav>
+
+      <aside className="conversation-pane">
+        <section className="brand">
+          <div>
+            <strong>AgentHub</strong>
+            <span>{labels.appTagline}</span>
+          </div>
+          <button type="button" onClick={openCreatePanel}>{labels.new}</button>
+        </section>
+
+        <section className="status-row">
+          <span className={`status-chip ${isSending ? "running" : ""}`}>
+            {isSending ? labels.running : labels.ready}
+          </span>
+          <button className="archive-toggle small" type="button" onClick={() => setShowArchived((current) => !current)}>
+            {showArchived ? labels.showActive : labels.showArchived}
+          </button>
+        </section>
 
         {isCreateOpen ? (
           <form className="create-panel" onSubmit={handleCreateConversation}>
-            <label>
-              <span>{t.title}</span>
-              <input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} />
-            </label>
-            <fieldset>
-              <legend>{t.chatMode}</legend>
-              <label>
-                <input
-                  checked={draftMode === "single"}
-                  name="chat-mode"
-                  onChange={() => handleDraftModeChange("single")}
-                  type="radio"
-                />
-                <span>{t.singleChat}</span>
-              </label>
-              <label>
-                <input
-                  checked={draftMode === "group"}
-                  name="chat-mode"
-                  onChange={() => handleDraftModeChange("group")}
-                  type="radio"
-                />
-                <span>{t.groupChat}</span>
-              </label>
-            </fieldset>
-            <fieldset>
-              <legend>{t.chooseAgent}</legend>
+            <input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder={labels.title} />
+            <div className="mode-row">
+              <button className={draftMode === "single" ? "selected" : ""} type="button" onClick={() => { setDraftMode("single"); setDraftAgentIds([draftAgentIds[0] ?? "orchestrator"]); }}>
+                {labels.single}
+              </button>
+              <button className={draftMode === "group" ? "selected" : ""} type="button" onClick={() => { setDraftMode("group"); setDraftAgentIds(defaultAgentIds); }}>
+                {labels.multi}
+              </button>
+            </div>
+            <div className="agent-picker">
               {agents.map((agent) => (
                 <label key={agent.id}>
-                  <input
-                    checked={draftAgentIds.includes(agent.id)}
-                    onChange={() => toggleDraftAgent(agent.id)}
-                    type={draftMode === "single" ? "radio" : "checkbox"}
-                  />
+                  <input checked={draftAgentIds.includes(agent.id)} onChange={() => toggleDraftAgent(agent.id)} type={draftMode === "single" ? "radio" : "checkbox"} />
                   <span>{agent.name}</span>
                 </label>
               ))}
-            </fieldset>
+            </div>
             <div className="create-actions">
-              <button className="ghost-button" type="button" onClick={() => setIsCreateOpen(false)}>
-                {t.cancel}
-              </button>
-              <button className="primary-mini" type="submit">
-                {t.createConversation}
-              </button>
+              <button type="button" onClick={() => setIsCreateOpen(false)}>{labels.cancel}</button>
+              <button type="submit">{labels.create}</button>
             </div>
           </form>
         ) : null}
 
-        <input
-          className="conversation-search"
-          value={conversationSearch}
-          onChange={(event) => setConversationSearch(event.target.value)}
-          placeholder={t.search}
-        />
-
-        <button
-          className="ghost-button full"
-          type="button"
-          onClick={() => setShowArchived((current) => !current)}
-        >
-          {showArchived ? t.showActive : t.showArchived}
-        </button>
+        <input className="search-input" value={conversationSearch} onChange={(event) => setConversationSearch(event.target.value)} placeholder={labels.search} />
 
         <section className="conversation-list">
-          {conversations.length === 0 ? (
-            <p className="muted">{t.noConversation}</p>
-          ) : (
-            conversations.map((conversation) => (
-              <article
-                className={`conversation-item ${
-                  conversation.id === activeConversationId ? "active" : ""
-                }`}
-                key={conversation.id}
-                onClick={() => setActiveConversationId(conversation.id)}
-              >
+          {conversations.map((conversation) => (
+            <article className={`conversation-card ${conversation.id === activeConversationId ? "active" : ""}`} key={conversation.id} onClick={() => setActiveConversationId(conversation.id)}>
+              <div className="conversation-avatar">{conversation.agent_ids[0]?.slice(0, 2).toUpperCase() ?? "AH"}</div>
+              <div className="conversation-content">
                 <div className="conversation-title-row">
                   <strong>{conversation.title}</strong>
-                  {conversation.is_pinned ? <span className="pin-mark">{t.pinned}</span> : null}
+                  <span>{formatRelativeTime(conversation.updated_at)}</span>
                 </div>
-                <span className="conversation-meta">
-                  {conversation.mode} · {conversation.agent_ids.join(", ")}
-                </span>
-                <p>{conversation.last_message || t.noMessages}</p>
+                <small>{conversation.mode} · {conversation.agent_ids.join(", ")}</small>
+                <p>{conversation.last_message || labels.noMessages}</p>
                 <div className="conversation-actions">
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      handlePinConversation(conversation);
-                    }}
-                  >
-                    {conversation.is_pinned ? t.unpin : t.pin}
+                  <button type="button" onClick={(event) => { event.stopPropagation(); handleConversationPin(conversation); }}>
+                    {conversation.is_pinned ? labels.unpin : labels.pin}
                   </button>
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      handleArchiveConversation(conversation);
-                    }}
-                  >
-                    {conversation.is_archived ? t.restore : t.archive}
+                  <button type="button" onClick={(event) => { event.stopPropagation(); handleArchive(conversation); }}>
+                    {conversation.is_archived ? labels.restore : labels.archive}
                   </button>
                 </div>
-              </article>
-            ))
-          )}
-        </section>
-      </aside>
-
-      <section className="workspace">
-        <header className="hero-card">
-          <div>
-            <span className="eyebrow">AgentHub Runtime</span>
-            <h1>{t.heroTitle}</h1>
-            <p>{t.heroSubtitle}</p>
-          </div>
-          <div className="hero-metrics">
-            <Metric label={t.agentsOnline} value={agents.length.toString()} />
-            <Metric label={t.artifacts} value={artifacts.length.toString()} />
-            <Metric label={t.mode} value={activeConversation?.mode ?? "-"} />
-          </div>
-        </header>
-
-        <section className="agent-strip" aria-label={t.selectedAgents}>
-          {agents.map((agent) => (
-            <article className="agent-item" key={agent.id}>
-              <span className="agent-avatar">{agent.name.slice(0, 2).toUpperCase()}</span>
-              <div>
-                <strong>{agent.name}</strong>
-                <span>{agent.description}</span>
               </div>
             </article>
           ))}
         </section>
+      </aside>
 
-        <section className="chat-panel" aria-label="Chat messages">
-          <div className="chat-panel-header">
-            <div>
-              <span className="eyebrow">{t.context}</span>
-              <h2>{activeConversation?.title ?? t.emptyTitle}</h2>
-            </div>
-            <span className="status-pill">{activeConversation?.mode ?? t.noConversation}</span>
+      <section className="chat-panel">
+        <header className="chat-header">
+          <div>
+            <span>上下文</span>
+            <h1>{activeConversation?.title ?? labels.emptyTitle}</h1>
           </div>
+          <div className="header-pills">
+            <span>{agentMode === "multi" ? labels.multi : labels.single}</span>
+            <span>{selectedAgentIds.length} Agents</span>
+            <button type="button" onClick={() => setRightPanelOpen((current) => !current)}>
+              {rightPanelOpen ? labels.collapse : labels.expand}
+            </button>
+          </div>
+        </header>
 
-          <div className="chat-stream">
-            {messages.length === 0 ? (
-              <div className="empty-state">
-                <strong>{activeConversation ? activeConversation.title : t.emptyTitle}</strong>
-                <span>{t.emptySubtitle}</span>
-              </div>
-            ) : (
-              messages.map((message) => (
-                <article className={`message ${message.role}`} key={message.id}>
-                  <div className="message-meta">
-                    <span>{message.role === "user" ? t.user : message.sender}</span>
-                    <small>{message.format}</small>
-                  </div>
-                  {message.quoted_message_id ? (
-                    <small className="quoted-line">
-                      {t.quoted}: {message.quoted_message_id}
-                    </small>
-                  ) : null}
-                  <MarkdownMessage content={message.content} copyLabel={t.copy} />
-                  <button
-                    className="message-action"
-                    type="button"
-                    onClick={() => setQuotedMessage(message)}
-                  >
-                    {t.quote}
-                  </button>
-                </article>
-              ))
-            )}
-          </div>
+        <section className="chat-stream">
+          {messages.length === 0 ? (
+            <div className="empty-state">{labels.emptyTitle}</div>
+          ) : (
+            messages.map((message) => (
+              <MessageCard
+                attachmentMap={attachmentMap}
+                key={message.id}
+                labels={labels}
+                message={message}
+                onPin={() => handleMessagePin(message)}
+                onQuote={() => setQuotedMessage(message)}
+                onToast={setToast}
+              />
+            ))
+          )}
+          {progressSteps.length ? <ProgressPanel steps={progressSteps} /> : null}
         </section>
 
         <form className="composer" onSubmit={handleSubmit}>
           {quotedMessage ? (
             <div className="quote-banner">
-              <span>
-                {t.quoted}: {quotedMessage.content.slice(0, 96)}
-              </span>
-              <button type="button" onClick={() => setQuotedMessage(null)}>
-                {t.clear}
-              </button>
+              <span>{labels.quoted}: {quotedMessage.content.slice(0, 120)}</span>
+              <button type="button" onClick={() => setQuotedMessage(null)}>{labels.clear}</button>
             </div>
           ) : null}
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder={t.composerPlaceholder}
-            rows={4}
-          />
-          <div className="composer-actions">
-            {error ? <p className="error-text">{error}</p> : <span />}
-            <div className="composer-button-row">
-              <button disabled={!activeConversation || isSending} type="button" onClick={handleRegenerate}>
-                {t.regenerate}
-              </button>
-              <button className="send-button" disabled={!canSend} type="submit">
-                {isSending ? t.sending : t.send}
+          {pendingAttachments.length ? (
+            <div className="pending-files">
+              <span>{labels.pendingFiles}</span>
+              {pendingAttachments.map((attachment) => (
+                <button key={attachment.id} type="button" onClick={() => setPendingAttachments((current) => current.filter((item) => item.id !== attachment.id))}>
+                  {attachment.filename} x
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={labels.placeholder} />
+          <div className="composer-footer">
+            <div className="composer-left">
+              <label className="upload-button">
+                + {labels.upload}
+                <input multiple type="file" onChange={handleFiles} />
+              </label>
+              <div className="tool-toggles" aria-label={labels.toolSwitches}>
+                {(Object.keys(toolPreferences) as Array<keyof ToolPreferences>).map((key) => (
+                  <button
+                    className={toolPreferences[key] ? "active" : ""}
+                    key={key}
+                    type="button"
+                    onClick={() => toggleToolPreference(key)}
+                  >
+                    {toolLabel(key)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {error ? <span className="error-text">{error}</span> : <span />}
+            <div className="composer-actions">
+              <select className="model-select" value={selectedModelId} onChange={(event) => setSelectedModelId(event.target.value)}>
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>{model.name}</option>
+                ))}
+              </select>
+              <select className="model-select" value={agentMode} onChange={(event) => setAgentMode(event.target.value as "single" | "multi")}>
+                <option value="single">{labels.single}</option>
+                <option value="multi">{labels.multi}</option>
+              </select>
+              <button type="button" onClick={handleRegenerate} disabled={!activeConversation || isSending}>{labels.regenerate}</button>
+              <button className="send-button" disabled={!activeConversation || isSending || !input.trim()} type="submit">
+                {isSending ? labels.sending : labels.send}
               </button>
             </div>
           </div>
         </form>
       </section>
 
-      <aside className="artifact-panel" aria-label={t.artifacts}>
-        <header className="panel-header">
-          <div>
-            <span className="eyebrow">{t.preview}</span>
-            <h2>{t.artifacts}</h2>
-          </div>
-          <span className="count-pill">{artifacts.length}</span>
-        </header>
-        {!hasArtifacts ? (
-          <p className="artifact-empty">{t.generatedArtifacts}</p>
-        ) : (
-          artifacts.map((artifact) => (
-            <ArtifactCard
-              artifact={artifact}
-              key={artifact.id}
-              labels={t}
-              onPreview={() => setPreviewArtifact(artifact)}
-            />
-          ))
-        )}
+      <aside className={`right-panel ${rightPanelOpen ? "open" : ""}`}>
+        <div className="right-tabs">
+          {(["artifacts", "agents", "tools", "context"] as RightPanelTab[]).map((tab) => (
+            <button className={rightTab === tab ? "active" : ""} key={tab} type="button" onClick={() => setRightTab(tab)}>
+              {rightTabLabel(tab)}
+            </button>
+          ))}
+        </div>
+        <RightPanelContent
+          activeConversation={activeConversation}
+          agents={agents}
+          artifacts={artifacts}
+          attachments={attachments}
+          labels={labels}
+          onApply={handleApplyDiff}
+          onPreview={setPreviewArtifact}
+          onToast={setToast}
+          pinnedMessages={pinnedMessages}
+          selectedAgentIds={selectedAgentIds}
+          tab={rightTab}
+          tools={tools}
+        />
       </aside>
 
       {previewArtifact ? (
         <div className="preview-modal" role="dialog" aria-modal="true">
-          <div className="preview-modal-card">
+          <div className="preview-card">
             <header>
               <h2>{previewArtifact.title}</h2>
-              <button type="button" onClick={() => setPreviewArtifact(null)}>
-                {t.close}
-              </button>
+              <button type="button" onClick={() => setPreviewArtifact(null)}>{labels.close}</button>
             </header>
-            <iframe
-              title={previewArtifact.title}
-              src={`http://localhost:8000${previewArtifact.preview_url}`}
-            />
+            <iframe title={previewArtifact.title} src={`${API_ORIGIN}${previewArtifact.preview_url}`} />
           </div>
         </div>
       ) : null}
+      {toast ? <div className="toast">{toast}</div> : null}
     </main>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function MessageCard({
+  attachmentMap,
+  labels: t,
+  message,
+  onPin,
+  onQuote,
+  onToast,
+}: {
+  attachmentMap: Map<string, Attachment>;
+  labels: typeof labels;
+  message: ChatMessage;
+  onPin: () => void;
+  onQuote: () => void;
+  onToast: (message: string) => void;
+}) {
+  const messageAttachments = (message.attachment_ids ?? [])
+    .map((id) => attachmentMap.get(id))
+    .filter(Boolean) as Attachment[];
+  const sender = message.role === "user" ? "你" : message.sender ?? "agent";
+
   return (
-    <div className="metric-card">
-      <strong>{value}</strong>
-      <span>{label}</span>
+    <article className={`message-card ${message.role}`}>
+      <div className="avatar">{sender.slice(0, 2).toUpperCase()}</div>
+      <div className="message-bubble">
+        <header>
+          <strong>{sender}</strong>
+          <div className="message-actions">
+            <button type="button" onClick={onQuote}>{t.quote}</button>
+            <button type="button" onClick={onPin}>{message.is_pinned ? t.unpinMessage : t.pinMessage}</button>
+          </div>
+        </header>
+        {message.quoted_message_id ? <small className="quoted-line">{t.quoted}: {message.quoted_message_id}</small> : null}
+        <MarkdownMessage content={message.content} copyLabel={t.copy} copiedLabel={t.copied} onToast={onToast} />
+        {messageAttachments.length ? <AttachmentList attachments={messageAttachments} /> : null}
+      </div>
+    </article>
+  );
+}
+
+function AttachmentList({ attachments }: { attachments: Attachment[] }) {
+  return (
+    <div className="attachment-list">
+      {attachments.map((attachment) =>
+        attachment.type === "image" ? (
+          <a href={`${API_ORIGIN}${attachment.url}`} key={attachment.id} target="_blank" rel="noreferrer">
+            <img alt={attachment.filename} src={`${API_ORIGIN}${attachment.url}`} />
+          </a>
+        ) : (
+          <a className="file-chip" href={`${API_ORIGIN}${attachment.url}`} key={attachment.id} target="_blank" rel="noreferrer">
+            {attachment.filename}
+          </a>
+        ),
+      )}
     </div>
+  );
+}
+
+function ProgressPanel({ steps }: { steps: ProgressStep[] }) {
+  const doneCount = steps.filter((step) => step.status === "done").length;
+  const percent = steps.length ? Math.round((doneCount / steps.length) * 100) : 0;
+
+  return (
+    <section className="progress-panel">
+      <header>
+        <strong>{labels.progress}</strong>
+        <span>{percent}%</span>
+      </header>
+      <div className="progress-track">
+        <div style={{ width: `${percent}%` }} />
+      </div>
+      <ol>
+        {steps.map((step) => (
+          <li className={step.status} key={step.id}>
+            <span />
+            <div>
+              <strong>{step.label}</strong>
+              {step.detail ? <small>{step.detail}</small> : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function RightPanelContent({
+  activeConversation,
+  agents,
+  artifacts,
+  attachments,
+  labels: t,
+  onApply,
+  onPreview,
+  onToast,
+  pinnedMessages,
+  selectedAgentIds,
+  tab,
+  tools,
+}: {
+  activeConversation?: Conversation;
+  agents: Agent[];
+  artifacts: Artifact[];
+  attachments: Attachment[];
+  labels: typeof labels;
+  onApply: (artifact: Artifact) => void;
+  onPreview: (artifact: Artifact) => void;
+  onToast: (message: string) => void;
+  pinnedMessages: ChatMessage[];
+  selectedAgentIds: string[];
+  tab: RightPanelTab;
+  tools: ToolOption[];
+}) {
+  if (tab === "agents") {
+    const selected = agents.filter((agent) => selectedAgentIds.includes(agent.id));
+    return (
+      <div className="right-content">
+        {selected.map((agent) => (
+          <section className="side-card" key={agent.id}>
+            <strong>{agent.name}</strong>
+            <p>{agent.description}</p>
+            <TagRow items={agent.capabilities ?? []} />
+            <small>Model: {agent.model_provider ?? "conversation model"}</small>
+            <small>Skills: {(agent.skills ?? []).join(", ") || "none"}</small>
+            <small>Tools: {(agent.tools ?? []).join(", ") || "none"}</small>
+          </section>
+        ))}
+      </div>
+    );
+  }
+
+  if (tab === "tools") {
+    return (
+      <div className="right-content">
+        {tools.map((tool) => (
+          <section className="side-card" key={tool.id}>
+            <strong>{tool.name ?? tool.id}</strong>
+            <p>{tool.description ?? tool.id}</p>
+            <small>{tool.id}</small>
+          </section>
+        ))}
+      </div>
+    );
+  }
+
+  if (tab === "context") {
+    return (
+      <div className="right-content">
+        <section className="side-card">
+          <strong>{activeConversation?.title ?? t.emptyTitle}</strong>
+          <p>{activeConversation?.last_message || t.noMessages}</p>
+        </section>
+        <section className="side-card">
+          <strong>Pinned Messages</strong>
+          {pinnedMessages.length ? pinnedMessages.map((message) => <p key={message.id}>{message.content}</p>) : <p>暂无长期记忆</p>}
+        </section>
+        <section className="side-card">
+          <strong>Attachments</strong>
+          {attachments.length ? attachments.map((attachment) => <p key={attachment.id}>{attachment.filename}</p>) : <p>暂无附件</p>}
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="right-content">
+      {artifacts.length === 0 ? (
+        <section className="side-card"><p>{t.noArtifacts}</p></section>
+      ) : (
+        artifacts.map((artifact) => (
+          <ArtifactCard artifact={artifact} key={artifact.id} labels={t} onApply={() => onApply(artifact)} onPreview={() => onPreview(artifact)} onToast={onToast} />
+        ))
+      )}
+    </div>
+  );
+}
+
+function ArtifactCard({
+  artifact,
+  labels: t,
+  onApply,
+  onPreview,
+  onToast,
+}: {
+  artifact: Artifact;
+  labels: typeof labels;
+  onApply: () => void;
+  onPreview: () => void;
+  onToast: (message: string) => void;
+}) {
+  async function handleCopy() {
+    await navigator.clipboard.writeText(artifact.content ?? artifact.preview_url ?? "");
+    onToast(t.copied);
+  }
+
+  return (
+    <article className={`artifact-card ${artifact.type}`}>
+      <header>
+        <span>{artifact.type}</span>
+        <strong>{artifact.title}</strong>
+      </header>
+      {artifact.content ? <pre>{artifact.content}</pre> : null}
+      <footer>
+        {artifact.content ? <button type="button" onClick={handleCopy}>{t.copy}</button> : null}
+        {artifact.preview_url ? <button type="button" onClick={onPreview}>{t.preview}</button> : null}
+        {artifact.type === "diff" ? (
+          <button disabled={artifact.status === "applied"} type="button" onClick={onApply}>
+            {artifact.status === "applied" ? t.applied : t.applyDiff}
+          </button>
+        ) : null}
+      </footer>
+    </article>
   );
 }
 
 function MarkdownMessage({
   content,
   copyLabel,
+  copiedLabel,
+  onToast,
 }: {
   content: string;
   copyLabel: string;
+  copiedLabel: string;
+  onToast: (message: string) => void;
 }) {
   const blocks = parseMarkdownBlocks(content);
-
   return (
     <div className="message-body">
-      {blocks.map((block, index) => {
-        if (block.type === "code") {
-          return <CodeBlock block={block} copyLabel={copyLabel} key={`${block.type}-${index}`} />;
-        }
-        return renderTextBlock(block.content, index);
-      })}
+      {blocks.map((block, index) =>
+        block.type === "code" ? (
+          <CodeBlock block={block} copiedLabel={copiedLabel} copyLabel={copyLabel} key={`${block.type}-${index}`} onToast={onToast} />
+        ) : (
+          renderTextBlock(block.content, index)
+        ),
+      )}
     </div>
   );
 }
 
 type MarkdownBlock =
-  | {
-      type: "text";
-      content: string;
-    }
-  | {
-      type: "code";
-      content: string;
-      language: string;
-    };
+  | { type: "text"; content: string }
+  | { type: "code"; content: string; language: string };
 
 function parseMarkdownBlocks(content: string): MarkdownBlock[] {
   const blocks: MarkdownBlock[] = [];
   const fencePattern = /```([A-Za-z0-9_-]*)\n?([\s\S]*?)```/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
-
   while ((match = fencePattern.exec(content)) !== null) {
     if (match.index > cursor) {
-      blocks.push({
-        type: "text",
-        content: content.slice(cursor, match.index),
-      });
+      blocks.push({ type: "text", content: content.slice(cursor, match.index) });
     }
-    blocks.push({
-      type: "code",
-      language: match[1] || "text",
-      content: match[2].replace(/\n$/, ""),
-    });
+    blocks.push({ type: "code", language: match[1] || "text", content: match[2].replace(/\n$/, "") });
     cursor = match.index + match[0].length;
   }
-
   if (cursor < content.length) {
-    blocks.push({
-      type: "text",
-      content: content.slice(cursor),
-    });
+    blocks.push({ type: "text", content: content.slice(cursor) });
   }
-
   return blocks.length ? blocks : [{ type: "text", content }];
 }
 
 function renderTextBlock(content: string, key: number): ReactNode {
-  const paragraphs = content
-    .split(/\n{2,}/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean);
-
-  if (!paragraphs.length) {
-    return null;
-  }
-
+  const paragraphs = content.split(/\n{2,}/).map((paragraph) => paragraph.trim()).filter(Boolean);
   return paragraphs.map((paragraph, index) => (
     <p key={`text-${key}-${index}`}>
-      {paragraph.split("\n").map((line, lineIndex) => (
-        <span key={`${line}-${lineIndex}`}>
-          {line}
-          {lineIndex < paragraph.split("\n").length - 1 ? <br /> : null}
-        </span>
+      {paragraph.split("\n").map((line, lineIndex, lines) => (
+        <span key={`${line}-${lineIndex}`}>{line}{lineIndex < lines.length - 1 ? <br /> : null}</span>
       ))}
     </p>
   ));
@@ -787,69 +901,197 @@ function renderTextBlock(content: string, key: number): ReactNode {
 function CodeBlock({
   block,
   copyLabel,
+  copiedLabel,
+  onToast,
 }: {
   block: Extract<MarkdownBlock, { type: "code" }>;
   copyLabel: string;
+  copiedLabel: string;
+  onToast: (message: string) => void;
 }) {
   async function handleCopy() {
     await navigator.clipboard.writeText(block.content);
+    onToast(copiedLabel);
   }
-
   return (
-    <div className="message-code-block">
-      <div className="message-code-header">
+    <div className="code-block">
+      <header>
         <span>{block.language}</span>
-        <button type="button" onClick={handleCopy}>
-          {copyLabel}
-        </button>
-      </div>
-      <pre>
-        <code>{block.content}</code>
-      </pre>
+        <button type="button" onClick={handleCopy}>{copyLabel}</button>
+      </header>
+      <pre><code>{block.content}</code></pre>
     </div>
   );
 }
 
-function ArtifactCard({
-  artifact,
-  labels,
-  onPreview,
-}: {
-  artifact: Artifact;
-  labels: (typeof copy)[Language];
-  onPreview: () => void;
-}) {
-  async function handleCopy() {
-    await navigator.clipboard.writeText(artifact.content ?? artifact.preview_url ?? "");
-  }
-
+function TagRow({ items }: { items: string[] }) {
   return (
-    <article className={`artifact-card ${artifact.type === "conflict" ? "conflict" : ""}`}>
-      <div className="artifact-card-header">
-        <span>{artifact.type}</span>
-        <strong>{artifact.title}</strong>
-      </div>
-      <div className="artifact-actions">
-        {artifact.content ? (
-          <button type="button" onClick={handleCopy}>
-            {labels.copy}
-          </button>
-        ) : null}
-        {artifact.preview_url ? (
-          <button type="button" onClick={onPreview}>
-            {labels.expandPreview}
-          </button>
-        ) : null}
-      </div>
-      {artifact.content ? (
-        <pre>{artifact.content}</pre>
-      ) : (
-        <a href={`http://localhost:8000${artifact.preview_url}`} target="_blank" rel="noreferrer">
-          {labels.openPreview}
-        </a>
-      )}
-    </article>
+    <div className="tag-row">
+      {items.map((item) => <span key={item}>{item}</span>)}
+    </div>
   );
+}
+
+function initialProgressSteps(modelId: string, attachmentCount: number): ProgressStep[] {
+  return [
+    { id: "attachments", label: "准备附件", detail: `${attachmentCount} 个附件`, status: attachmentCount ? "active" : "done" },
+    { id: "model", label: "选择模型", detail: modelId, status: "pending" },
+    { id: "plan", label: "规划任务", status: "pending" },
+    { id: "agent", label: "调用 Agent", status: "pending" },
+    { id: "complete", label: "汇总结果", status: "pending" },
+  ];
+}
+
+function progressFromEvents(events: ChatResponse["events"]): ProgressStep[] {
+  const steps: ProgressStep[] = [];
+  for (const event of events ?? []) {
+    if (event.type === "model.selected") {
+      steps.push({
+        id: "model",
+        label: "选择模型",
+        detail: String(event.payload.provider ?? "auto"),
+        status: "done",
+      });
+    }
+    if (event.type === "attachments.prepared") {
+      steps.push({
+        id: "attachments",
+        label: "准备附件",
+        detail: `${event.payload.count ?? 0} 个附件，${event.payload.image_count ?? 0} 张图片`,
+        status: "done",
+      });
+    }
+    if (event.type === "run.planned") {
+      steps.push({
+        id: "plan",
+        label: "规划任务",
+        detail: String(event.payload.reason ?? ""),
+        status: "done",
+      });
+    }
+    if (event.type === "agent.started" || event.type === "agent.parallel_started") {
+      steps.push({
+        id: `${event.type}-${steps.length}`,
+        label: "调用 Agent",
+        detail: String(event.payload.agent_id ?? ""),
+        status: "done",
+      });
+    }
+    if (event.type === "agent.completed") {
+      steps.push({
+        id: `${event.type}-${steps.length}`,
+        label: "Agent 完成",
+        detail: `${event.payload.agent_id ?? ""} · ${event.payload.status ?? ""}`,
+        status: event.payload.status === "failed" ? "error" : "done",
+      });
+    }
+    if (event.type === "run.completed") {
+      steps.push({
+        id: "complete",
+        label: "汇总结果",
+        detail: String(event.payload.status ?? ""),
+        status: "done",
+      });
+    }
+  }
+  return dedupeProgress(steps);
+}
+
+function dedupeProgress(steps: ProgressStep[]): ProgressStep[] {
+  if (!steps.length) {
+    return [];
+  }
+  return steps;
+}
+
+function markProgressError(steps: ProgressStep[], detail: string): ProgressStep[] {
+  if (!steps.length) {
+    return [{ id: "error", label: "执行失败", detail, status: "error" }];
+  }
+  return steps.map((step, index) =>
+    index === steps.length - 1 ? { ...step, status: "error", detail } : step,
+  );
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      resolve(result.includes(",") ? result.split(",", 2)[1] : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("File read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function compressImageFile(file: File): Promise<File> {
+  const image = await loadImage(file);
+  const maxSide = 1280;
+  const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return file;
+  }
+  context.drawImage(image, 0, 0, width, height);
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+  URL.revokeObjectURL(image.src);
+  if (!blob || blob.size >= file.size) {
+    return file;
+  }
+  return new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), { type: "image/jpeg" });
+}
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Image load failed"));
+    image.src = URL.createObjectURL(file);
+  });
+}
+
+function formatRelativeTime(value: string): string {
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) {
+    return "";
+  }
+  const diff = Date.now() - timestamp;
+  const minutes = Math.max(0, Math.round(diff / 60000));
+  if (minutes < 1) {
+    return "刚刚";
+  }
+  if (minutes < 60) {
+    return `${minutes}分钟前`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}小时前`;
+  }
+  return `${Math.round(hours / 24)}天前`;
+}
+
+function toolLabel(key: keyof ToolPreferences): string {
+  return {
+    file: "文件",
+    image: "图片",
+    preview: "预览",
+    diff: "Diff",
+  }[key];
+}
+
+function rightTabLabel(tab: RightPanelTab): string {
+  return {
+    artifacts: labels.artifacts,
+    agents: labels.agents,
+    tools: labels.tools,
+    context: labels.context,
+  }[tab];
 }
 
 export default App;

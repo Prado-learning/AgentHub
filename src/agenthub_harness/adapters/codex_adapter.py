@@ -15,16 +15,23 @@ class CodexAdapter:
         capabilities: list[str] | None = None,
         skills: list[str] | None = None,
         model: str = "mock",
+        api_key: str | None = None,
+        base_url: str | None = None,
     ) -> None:
         self.id = agent_id
         self.name = name or "Codex"
         self.capabilities = capabilities or ["code", "review", "refactor"]
         self.skills = skills or []
         self.model = model
-        self.provider = OpenAICompatibleProvider(model=os.environ.get("CODEX_MODEL", model))
+        self.provider = OpenAICompatibleProvider(
+            model=os.environ.get("CODEX_MODEL", model),
+            api_key=api_key,
+            base_url=base_url,
+        )
 
     def run(self, task: AgentTask, context: RunContext) -> AgentResult:
-        mode = os.environ.get("CODEX_MODE", "mock").strip().lower()
+        default_mode = "llm" if os.environ.get("ENABLE_REAL_LLM", "").lower() in {"1", "true", "yes", "on"} else "mock"
+        mode = os.environ.get("CODEX_MODE", default_mode).strip().lower()
         if mode in {"llm", "openai", "openai_chat"}:
             return self._run_with_openai_compatible(task, context)
         return self._run_mock(task, context)
@@ -72,7 +79,13 @@ class CodexAdapter:
     ) -> AgentResult:
         prompt = self._build_prompt(task, context)
         try:
-            content = self.provider.complete(prompt)
+            if any(
+                str(attachment.get("mime_type", "")).startswith("image/")
+                for attachment in context.attachments or []
+            ):
+                content = self.provider.complete_with_attachments(prompt, context.attachments or [])
+            else:
+                content = self.provider.complete(prompt)
         except Exception as exc:
             return AgentResult(
                 agent_id=self.id,
@@ -121,7 +134,29 @@ class CodexAdapter:
             f"Conversation mode: {context.mode}\n"
             f"Available tools requested by orchestrator: {', '.join(task.tools) or 'none'}\n"
             f"Skills:\n{skill_text}\n\n"
+            f"Pinned long-term context:\n{self._format_pinned_context(context)}\n\n"
+            f"Current attachments:\n{self._format_attachments(context)}\n\n"
             f"Recent history:\n{history}\n\n"
             f"Task:\n{task.instruction}\n\n"
             "Return concise markdown. Use fenced code blocks for code."
         )
+
+    def _format_pinned_context(self, context: RunContext) -> str:
+        if not context.pinned_context:
+            return "No pinned context."
+        return "\n".join(
+            f"- {item.get('sender') or item.get('role')}: {item.get('content')}"
+            for item in context.pinned_context
+        )
+
+    def _format_attachments(self, context: RunContext) -> str:
+        if not context.attachments:
+            return "No attachments."
+        sections: list[str] = []
+        for attachment in context.attachments:
+            extracted = str(attachment.get("extracted_text") or "").strip()
+            preview = extracted[:3000] if extracted else "No extracted text."
+            sections.append(
+                f"- {attachment.get('filename')} ({attachment.get('mime_type')}):\n{preview}"
+            )
+        return "\n\n".join(sections)

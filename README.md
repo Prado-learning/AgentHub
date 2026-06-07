@@ -1,82 +1,203 @@
-# AgentHub Demo
+# AgentHub
 
-这是 AgentHub Demo 的 Day 1 最小可运行版本：React 前端 + FastAPI 后端，跑通“用户输入消息 -> 调用 `/chat` -> 返回 mock Agent 回复和 artifacts -> 前端展示”的闭环。
+AgentHub is a Web-based multi-agent collaboration workspace. It uses an IM-style chat experience to coordinate agents, tools, files, images, previews, and generated artifacts in one product interface.
 
-## 当前已实现
+The current implementation is no longer a Day 1 mock demo. It includes a FastAPI backend, a React/Vite frontend, configurable agents, OpenAI-compatible model providers, file/image attachments, artifact persistence, preview cards, pinned context, progress events, and a four-column Web app layout.
 
-- FastAPI 后端接口：`GET /health`、`POST /chat`、`GET /agents`、artifact 查询和预览接口。
-- React + Vite + TypeScript 单页前端。
-- 聊天页面可以输入消息并调用后端 mock `/chat`。
-- 前端可以展示 Agent 回复，以及 code / review / preview 三类 artifact 卡片。
-- 预留 Harness 目录结构，方便 Day 2 接入 `HarnessRunner`。
+## Current Capabilities
 
-## 环境准备
+- IM-style conversation list with create, search, pin, archive, restore, and active sorting.
+- Single-agent and multi-agent chat modes.
+- Orchestrator-based task routing with rule dispatch and optional LLM JSON planner.
+- Built-in agents:
+  - Orchestrator
+  - Code Agent
+  - UI Builder
+  - Code Reviewer
+  - Vision Agent
+  - File Analyst
+- Built-in tools:
+  - `file_reader_tool`
+  - `image_reader_tool`
+  - `preview_tool`
+  - `code_review_tool`
+  - `ui_builder_tool`
+- Model selector with Auto, StepFun, DeepSeek, and Doubao.
+- Skill files under `skills/*.md` used as formal agent instructions.
+- Image and file upload.
+- Image-aware prompt flow for vision-capable OpenAI-compatible models.
+- File text extraction for text-like attachments.
+- Chat history and pinned messages passed into agent context.
+- Artifact persistence under `agent-workspace/runtime`.
+- Preview HTML persistence under `agent-workspace/previews`.
+- Diff artifact apply API with workspace path checks and backup records.
+- Four-column Web UI:
+  - left rail navigation
+  - conversation list
+  - main chat workspace
+  - collapsible right panel for Artifacts / Agents / Tools / Context
+- Execution progress display based on backend run events.
 
-本项目 Python 依赖使用 `uv` 管理。首次进入项目后运行：
+## Project Structure
 
-```bash
+```text
+app/
+  api/
+    main.py
+    routers/              FastAPI routes
+    services/             conversation, artifact, attachment, diff, chat services
+  configs/
+    agent.yaml            built-in agent definitions
+    models.yaml           built-in model provider definitions
+    tools.yaml            tool metadata
+  web/
+    src/                  React app
+
+src/agenthub_harness/
+  adapters/               mock, OpenAI-compatible, Codex-style adapters
+  core/                   RunContext, HarnessRunner, run result/events
+  runtime/                Orchestrator planner and rule dispatch
+  tools/                  preview, file, image, review, UI tools
+  skills/                 skill loader
+  llm/                    OpenAI-compatible chat provider
+
+skills/
+  orchestrator.md
+  code_agent.md
+  ui_builder.md
+  code_review.md
+  vision_agent.md
+  file_analyst.md
+
+agent-workspace/
+  generated/
+  previews/
+  uploads/
+  logs/
+```
+
+## Environment
+
+Use the `agenthub` Conda environment on D drive.
+
+```powershell
+conda activate agenthub
+```
+
+Python dependencies are managed by `uv`:
+
+```powershell
 uv sync --group dev
 ```
 
-前端依赖使用 npm：
+Frontend dependencies are installed under `app/web/node_modules`:
 
-```bash
-cd app/web
-npm install
+```powershell
+cd app\web
+npm install --cache D:\code\agenthub\AgentHub\.npm-cache
 ```
 
-如果 npm 下载慢，可以先设置镜像源：
+## Model Configuration
 
-```bash
-npm config set registry https://registry.npmmirror.com
+Create or update `.env` in the project root. API keys should stay in `.env`; do not commit them.
+
+```env
+ENABLE_REAL_LLM=true
+ENABLE_LLM_PLANNER=false
+LLM_TIMEOUT_SECONDS=180
+
+DEFAULT_MODEL_PROVIDER=stepfun
+
+OPENAI_API_KEY=
+OPENAI_BASE_URL=
+MODEL_NAME=
+
+STEPFUN_API_KEY=
+STEPFUN_BASE_URL=https://api.stepfun.com/step_plan/v1
+STEPFUN_MODEL_NAME=step-3.7-flash
+
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+DEEPSEEK_MODEL_NAME=
+
+DOUBAO_API_KEY=
+DOUBAO_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+DOUBAO_MODEL_NAME=
+
+CODEX_MODE=llm
+CODEX_MODEL=
 ```
 
-## 启动项目
-
-在项目根目录运行：
-
-```bash
-./scripts/dev_all.sh
-```
-
-启动后访问：
-
-- 前端：<http://localhost:5173>
-- 后端：<http://localhost:8000>
-
-## 分开启动
-
-后端：
-
-```bash
-uv run uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-前端：
-
-```bash
-cd app/web
-npm run dev
-```
-
-## 测试
-
-```bash
-uv run pytest
-```
-
-也可以直接跑一次 mock demo：
-
-```bash
-uv run python scripts/run_demo.py
-```
-
-## Day 1 边界
-
-当前版本故意只做 mock 闭环，不实现 AgentScope、真实 Harness、多 Agent 调度、Tool 调用、真实 LLM、数据库、沙箱、部署和流式输出。
-
-后续 Day 2 建议从这条链路开始扩展：
+Model options shown in the frontend are configured in:
 
 ```text
-FastAPI /chat -> HarnessRunner -> mock agents -> artifacts
+app/configs/models.yaml
 ```
+
+Agent definitions are configured in:
+
+```text
+app/configs/agent.yaml
+```
+
+## Run
+
+Backend:
+
+```powershell
+conda activate agenthub
+python -m uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Frontend:
+
+```powershell
+cd D:\code\agenthub\AgentHub\app\web
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+API docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+## Test
+
+Backend tests:
+
+```powershell
+D:\Miniconda3\envs\agenthub\python.exe -m pytest -q -p no:cacheprovider --basetemp D:\code\agenthub\AgentHub\.pytest-tmp-run
+```
+
+Frontend build:
+
+```powershell
+cd app\web
+npm run build -- --emptyOutDir
+```
+
+## Important Notes
+
+- `agent-workspace/runtime` stores runtime conversation/artifact data and is ignored by git.
+- `agent-workspace/uploads` stores uploaded files/images and is ignored by git except `.gitkeep`.
+- `.env` is ignored by git and should contain all private API keys.
+- Image understanding depends on the selected model supporting vision input. Doubao vision-capable models should be used for image tasks.
+- The current `CodexAdapter` is an AgentHub adapter abstraction with mock/LLM modes. It is not yet a full official Codex CLI or Claude Code integration.
+
+## Known Gaps
+
+- User-created custom agents are not implemented yet.
+- Claude Code / OpenCode / official Codex CLI integration is not complete.
+- Deployment cards and deployment pipelines are not implemented yet.
+- Long-context automatic summarization is not implemented yet.
+- Diff apply exists, but the frontend does not yet have a professional split/unified diff viewer.
+- Source-level merge conflict resolution is still basic.
+- Desktop and mobile clients are not implemented yet.
+
