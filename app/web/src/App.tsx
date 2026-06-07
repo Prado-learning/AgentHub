@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 
 import {
+  API_BASE_URL,
   archiveConversation,
   createConversation,
   getAgents,
@@ -64,6 +65,11 @@ const copy = {
     openPreview: "打开预览",
     close: "关闭",
     preview: "预览",
+    previewOnly: "前端预览",
+    showPreview: "打开预览",
+    hidePreview: "收起预览",
+    previewHint: "右侧只展示可渲染的前端页面，普通代码和文字继续留在中间对话框。",
+    thinkingSummary: "思考摘要",
     user: "你",
     statusReady: "已就绪",
     statusRunning: "运行中",
@@ -125,6 +131,11 @@ const copy = {
     openPreview: "Open preview",
     close: "Close",
     preview: "Preview",
+    previewOnly: "Frontend preview",
+    showPreview: "Open preview",
+    hidePreview: "Collapse preview",
+    previewHint: "The right side only renders frontend previews; code and text stay in the center chat.",
+    thinkingSummary: "Thinking summary",
     user: "You",
     statusReady: "Ready",
     statusRunning: "Running",
@@ -156,6 +167,8 @@ function App() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [quotedMessage, setQuotedMessage] = useState<ChatMessage | null>(null);
   const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
+  const [inlinePreviewArtifactId, setInlinePreviewArtifactId] = useState("");
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [input, setInput] = useState(initialPrompt);
   const [error, setError] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -239,11 +252,30 @@ function App() {
     () => conversations.find((conversation) => conversation.id === activeConversationId),
     [activeConversationId, conversations],
   );
+  const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const canSend = useMemo(
     () => input.trim().length > 0 && !isSending && Boolean(activeConversation),
     [activeConversation, input, isSending],
   );
-  const hasArtifacts = artifacts.length > 0;
+  const lastUserMessageId = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "user")?.id ?? "",
+    [messages],
+  );
+  const previewArtifacts = useMemo(
+    () => artifacts.filter((artifact) => Boolean(artifact.preview_url)),
+    [artifacts],
+  );
+  const chatArtifacts = useMemo(
+    () => artifacts.filter((artifact) => !artifact.preview_url),
+    [artifacts],
+  );
+  const inlinePreviewArtifact = useMemo(
+    () =>
+      previewArtifacts.find((artifact) => artifact.id === inlinePreviewArtifactId) ??
+      previewArtifacts[0] ??
+      null,
+    [inlinePreviewArtifactId, previewArtifacts],
+  );
 
   async function reloadConversations(preferredId?: string) {
     const items = await getConversations({ search: conversationSearch, archived: showArchived });
@@ -403,8 +435,11 @@ function App() {
     }
   }
 
+  const hasInlinePreview = Boolean(inlinePreviewArtifact);
+  const shouldShowPreviewPanel = hasInlinePreview && isPreviewOpen;
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${shouldShowPreviewPanel ? "has-preview" : "no-preview"}`}>
       <section className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark">AH</div>
@@ -551,40 +586,20 @@ function App() {
       </aside>
 
       <section className="workspace">
-        <header className="hero-card">
+        <header className="conversation-summary">
           <div>
-            <span className="eyebrow">AgentHub Runtime</span>
-            <h1>{t.heroTitle}</h1>
-            <p>{t.heroSubtitle}</p>
+            <span className="eyebrow">{t.context}</span>
+            <h1>{activeConversation?.title ?? t.emptyTitle}</h1>
           </div>
-          <div className="hero-metrics">
-            <Metric label={t.agentsOnline} value={agents.length.toString()} />
-            <Metric label={t.artifacts} value={artifacts.length.toString()} />
-            <Metric label={t.mode} value={activeConversation?.mode ?? "-"} />
+          <div className="conversation-summary-meta">
+            <span className="status-pill">{activeConversation?.mode ?? t.noConversation}</span>
+            <span className="status-pill">
+              {(activeConversation?.agent_ids.length ?? 0).toString()} {t.agentsOnline}
+            </span>
           </div>
         </header>
 
-        <section className="agent-strip" aria-label={t.selectedAgents}>
-          {agents.map((agent) => (
-            <article className="agent-item" key={agent.id}>
-              <span className="agent-avatar">{agent.name.slice(0, 2).toUpperCase()}</span>
-              <div>
-                <strong>{agent.name}</strong>
-                <span>{agent.description}</span>
-              </div>
-            </article>
-          ))}
-        </section>
-
         <section className="chat-panel" aria-label="Chat messages">
-          <div className="chat-panel-header">
-            <div>
-              <span className="eyebrow">{t.context}</span>
-              <h2>{activeConversation?.title ?? t.emptyTitle}</h2>
-            </div>
-            <span className="status-pill">{activeConversation?.mode ?? t.noConversation}</span>
-          </div>
-
           <div className="chat-stream">
             {messages.length === 0 ? (
               <div className="empty-state">
@@ -592,29 +607,77 @@ function App() {
                 <span>{t.emptySubtitle}</span>
               </div>
             ) : (
-              messages.map((message) => (
-                <article className={`message ${message.role}`} key={message.id}>
-                  <div className="message-meta">
-                    <span>{message.role === "user" ? t.user : message.sender}</span>
-                    <small>{message.format}</small>
-                  </div>
-                  {message.quoted_message_id ? (
-                    <small className="quoted-line">
-                      {t.quoted}: {message.quoted_message_id}
-                    </small>
-                  ) : null}
-                  <MarkdownMessage content={message.content} copyLabel={t.copy} />
-                  <button
-                    className="message-action"
-                    type="button"
-                    onClick={() => setQuotedMessage(message)}
-                  >
-                    {t.quote}
-                  </button>
-                </article>
-              ))
+              messages.map((message) => {
+                const senderId = message.role === "user" ? "user" : message.sender ?? "agent";
+                const senderName =
+                  message.role === "user" ? t.user : agentById.get(senderId)?.name ?? senderId;
+
+                return (
+                  <article className={`message-row ${message.role}`} key={message.id}>
+                    {message.role === "user" ? (
+                      <UserAvatar label={t.user} />
+                    ) : (
+                      <AgentAvatar agentId={senderId} label={senderName} />
+                    )}
+                    <div className="message-stack">
+                      <div className={`message ${message.role}`}>
+                        <div className="message-meta">
+                          <span>{senderName}</span>
+                          <small>{message.format}</small>
+                        </div>
+                        {message.role !== "user" ? (
+                          <ThinkingTrace
+                            label={t.thinkingSummary}
+                            language={language}
+                            message={message}
+                            senderName={senderName}
+                          />
+                        ) : null}
+                        {message.quoted_message_id ? (
+                          <small className="quoted-line">
+                            {t.quoted}: {message.quoted_message_id}
+                          </small>
+                        ) : null}
+                        <MarkdownMessage content={message.content} copyLabel={t.copy} />
+                        <button
+                          className="message-action"
+                          type="button"
+                          onClick={() => setQuotedMessage(message)}
+                        >
+                          {t.quote}
+                        </button>
+                      </div>
+                      {message.role === "user" && message.id === lastUserMessageId ? (
+                        <div className="message-under-actions">
+                          <button
+                            className="regenerate-inline"
+                            disabled={!activeConversation || isSending}
+                            type="button"
+                            onClick={handleRegenerate}
+                          >
+                            {t.regenerate}
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </article>
+                );
+              })
             )}
           </div>
+          {chatArtifacts.length ? (
+            <section className="inline-artifacts" aria-label={t.artifacts}>
+              <div className="inline-artifacts-header">
+                <span className="eyebrow">{t.artifacts}</span>
+                <span className="count-pill">{chatArtifacts.length}</span>
+              </div>
+              <div className="inline-artifact-list">
+                {chatArtifacts.map((artifact) => (
+                  <ArtifactCard artifact={artifact} key={artifact.id} labels={t} />
+                ))}
+              </div>
+            </section>
+          ) : null}
         </section>
 
         <form className="composer" onSubmit={handleSubmit}>
@@ -637,9 +700,6 @@ function App() {
           <div className="composer-actions">
             {error ? <p className="error-text">{error}</p> : <span />}
             <div className="composer-button-row">
-              <button disabled={!activeConversation || isSending} type="button" onClick={handleRegenerate}>
-                {t.regenerate}
-              </button>
               <button className="send-button" disabled={!canSend} type="submit">
                 {isSending ? t.sending : t.send}
               </button>
@@ -648,27 +708,57 @@ function App() {
         </form>
       </section>
 
-      <aside className="artifact-panel" aria-label={t.artifacts}>
-        <header className="panel-header">
-          <div>
-            <span className="eyebrow">{t.preview}</span>
-            <h2>{t.artifacts}</h2>
+      {inlinePreviewArtifact && !isPreviewOpen ? (
+        <button
+          className="preview-rail-toggle"
+          type="button"
+          onClick={() => setIsPreviewOpen(true)}
+        >
+          <span>{t.previewOnly}</span>
+          <small>{previewArtifacts.length}</small>
+        </button>
+      ) : null}
+
+      {inlinePreviewArtifact && isPreviewOpen ? (
+        <aside className="preview-panel" aria-label={t.preview}>
+          <header className="panel-header">
+            <div>
+              <span className="eyebrow">{t.preview}</span>
+              <h2>{t.previewOnly}</h2>
+            </div>
+            <span className="count-pill">{previewArtifacts.length}</span>
+          </header>
+          <button className="ghost-button full" type="button" onClick={() => setIsPreviewOpen(false)}>
+            {t.hidePreview}
+          </button>
+          <p className="preview-hint">{t.previewHint}</p>
+          <div className="preview-tabs">
+            {previewArtifacts.map((artifact) => (
+              <button
+                className={artifact.id === inlinePreviewArtifact.id ? "active" : ""}
+                key={artifact.id}
+                type="button"
+                onClick={() => setInlinePreviewArtifactId(artifact.id)}
+              >
+                {artifact.title}
+              </button>
+            ))}
           </div>
-          <span className="count-pill">{artifacts.length}</span>
-        </header>
-        {!hasArtifacts ? (
-          <p className="artifact-empty">{t.generatedArtifacts}</p>
-        ) : (
-          artifacts.map((artifact) => (
-            <ArtifactCard
-              artifact={artifact}
-              key={artifact.id}
-              labels={t}
-              onPreview={() => setPreviewArtifact(artifact)}
+          <div className="inline-preview-frame">
+            <iframe
+              title={inlinePreviewArtifact.title}
+              src={`${API_BASE_URL}${inlinePreviewArtifact.preview_url}`}
             />
-          ))
-        )}
-      </aside>
+          </div>
+          <button
+            className="primary-mini full"
+            type="button"
+            onClick={() => setPreviewArtifact(inlinePreviewArtifact)}
+          >
+            {t.expandPreview}
+          </button>
+        </aside>
+      ) : null}
 
       {previewArtifact ? (
         <div className="preview-modal" role="dialog" aria-modal="true">
@@ -681,7 +771,7 @@ function App() {
             </header>
             <iframe
               title={previewArtifact.title}
-              src={`http://localhost:8000${previewArtifact.preview_url}`}
+              src={`${API_BASE_URL}${previewArtifact.preview_url}`}
             />
           </div>
         </div>
@@ -690,13 +780,113 @@ function App() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function AgentAvatar({ agentId, label }: { agentId: string; label: string }) {
+  const profile = getAgentAvatarProfile(agentId, label);
+
   return (
-    <div className="metric-card">
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
+    <span
+      className={`agent-avatar agent-avatar-${profile.kind}`}
+      title={label}
+      aria-label={`${label} avatar`}
+    >
+      <span className="avatar-face" aria-hidden="true">
+        <span className="avatar-eye left" />
+        <span className="avatar-eye right" />
+        <span className="avatar-smile" />
+      </span>
+      <span className="avatar-symbol" aria-hidden="true">
+        {profile.symbol}
+      </span>
+    </span>
   );
+}
+
+function UserAvatar({ label }: { label: string }) {
+  return (
+    <span className="user-avatar" title={label} aria-label={`${label} avatar`}>
+      <span className="user-hair" aria-hidden="true" />
+      <span className="user-face" aria-hidden="true">
+        <span className="user-eye left" />
+        <span className="user-eye right" />
+        <span className="user-smile" />
+      </span>
+    </span>
+  );
+}
+
+function getAgentAvatarProfile(agentId: string, label: string) {
+  const normalized = `${agentId} ${label}`.toLowerCase();
+
+  if (normalized.includes("orchestrator")) {
+    return { kind: "orchestrator", symbol: "PL" };
+  }
+  if (normalized.includes("review")) {
+    return { kind: "review", symbol: "OK" };
+  }
+  if (normalized.includes("codex") || normalized.includes("code")) {
+    return { kind: "codex", symbol: "</>" };
+  }
+  if (normalized.includes("ui") || normalized.includes("builder")) {
+    return { kind: "ui", symbol: "UI" };
+  }
+  return { kind: "default", symbol: label.slice(0, 2).toUpperCase() };
+}
+
+function ThinkingTrace({
+  label,
+  language,
+  message,
+  senderName,
+}: {
+  label: string;
+  language: Language;
+  message: ChatMessage;
+  senderName: string;
+}) {
+  const steps = buildThinkingSummary(message, senderName, language);
+
+  return (
+    <details className="thinking-trace" open>
+      <summary>{label}</summary>
+      <ul>
+        {steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+function buildThinkingSummary(
+  message: ChatMessage,
+  senderName: string,
+  language: Language,
+): string[] {
+  const sender = senderName || (language === "zh" ? "Agent" : "Agent");
+  const hasCode = /```|tsx|jsx|html|css|react/i.test(message.content);
+  const hasArtifacts = Boolean(message.artifact_ids?.length);
+
+  if (language === "zh") {
+    return [
+      `${sender} 先读取当前会话上下文和用户最近的输入。`,
+      hasCode
+        ? "识别到代码或界面相关内容，保持输出在中间对话框内方便复制和引用。"
+        : "判断当前问题更适合用文字结论直接回复。",
+      hasArtifacts
+        ? "如果产生了可预览页面，只把渲染结果放到右侧预览区。"
+        : "整理关键结论后再输出到下方回答区。",
+    ];
+  }
+
+  return [
+    `${sender} first reads the conversation context and the latest user message.`,
+    hasCode
+      ? "Code or UI-related content is kept inside the center chat for copying and quoting."
+      : "The current request is best answered as a direct text response.",
+    hasArtifacts
+      ? "Renderable previews can appear on the right, while source content stays in the chat."
+      : "The key result is organized before the final response below.",
+  ];
 }
 
 function MarkdownMessage({
@@ -813,11 +1003,9 @@ function CodeBlock({
 function ArtifactCard({
   artifact,
   labels,
-  onPreview,
 }: {
   artifact: Artifact;
   labels: (typeof copy)[Language];
-  onPreview: () => void;
 }) {
   async function handleCopy() {
     await navigator.clipboard.writeText(artifact.content ?? artifact.preview_url ?? "");
@@ -829,24 +1017,19 @@ function ArtifactCard({
         <span>{artifact.type}</span>
         <strong>{artifact.title}</strong>
       </div>
-      <div className="artifact-actions">
-        {artifact.content ? (
-          <button type="button" onClick={handleCopy}>
+      {artifact.content ? (
+        <>
+          <button className="artifact-copy" type="button" onClick={handleCopy}>
             {labels.copy}
           </button>
-        ) : null}
-        {artifact.preview_url ? (
-          <button type="button" onClick={onPreview}>
-            {labels.expandPreview}
-          </button>
-        ) : null}
-      </div>
-      {artifact.content ? (
-        <pre>{artifact.content}</pre>
-      ) : (
-        <a href={`http://localhost:8000${artifact.preview_url}`} target="_blank" rel="noreferrer">
+          <pre>{artifact.content}</pre>
+        </>
+      ) : artifact.preview_url ? (
+        <a href={`${API_BASE_URL}${artifact.preview_url}`} target="_blank" rel="noreferrer">
           {labels.openPreview}
         </a>
+      ) : (
+        <p className="artifact-empty">{labels.generatedArtifacts}</p>
       )}
     </article>
   );
