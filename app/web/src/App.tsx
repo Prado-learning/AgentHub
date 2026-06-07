@@ -1,9 +1,12 @@
-import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, CSSProperties, Dispatch, FormEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, useEffect, useMemo, useState } from "react";
 
 import {
   applyArtifactDiff,
   archiveConversation,
+  createAgent,
   createConversation,
+  getArtifactDiff,
+  getArtifactVersions,
   getAgents,
   getConversationArtifacts,
   getConversationAttachments,
@@ -14,21 +17,26 @@ import {
   pinConversation,
   pinMessage,
   regenerateChatMessage,
+  restoreArtifactVersion,
   sendChatMessage,
   unarchiveConversation,
   unpinConversation,
   unpinMessage,
+  updateArtifact,
   uploadAttachment,
 } from "./api";
 import type {
   Agent,
+  AgentCreateInput,
   Artifact,
+  ArtifactVersion,
   Attachment,
   ChatMessage,
   ChatResponse,
   Conversation,
   ConversationMode,
   ModelOption,
+  StructuredDiff,
   ToolOption,
   ToolPreferences,
 } from "./types";
@@ -91,6 +99,14 @@ const labels = {
   preview: "预览",
   close: "关闭",
   applyDiff: "应用 Diff",
+  viewDiff: "查看 Diff",
+  edit: "编辑",
+  save: "保存",
+  versions: "版本",
+  createAgent: "创建 Agent",
+  systemPrompt: "System Prompt",
+  selectedQuote: "引用选中",
+  deployOpen: "打开部署",
   applied: "已应用",
   copied: "复制成功",
   uploadSuccess: "上传成功",
@@ -113,6 +129,7 @@ function App() {
   const [agentMode, setAgentMode] = useState<"single" | "multi">("single");
   const [toolPreferences, setToolPreferences] = useState<ToolPreferences>(defaultToolPreferences);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [openConversationIds, setOpenConversationIds] = useState<string[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -125,7 +142,17 @@ function App() {
   const [draftMode, setDraftMode] = useState<ConversationMode>("single");
   const [draftAgentIds, setDraftAgentIds] = useState<string[]>(["orchestrator"]);
   const [quotedMessage, setQuotedMessage] = useState<ChatMessage | null>(null);
+  const [quotedText, setQuotedText] = useState("");
   const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
+  const [editArtifact, setEditArtifact] = useState<Artifact | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [agentDraft, setAgentDraft] = useState<AgentCreateInput>({
+    name: "",
+    description: "",
+    system_prompt: "",
+    capabilities: ["text"],
+    tools: [],
+  });
   const [input, setInput] = useState("请你说一下这个图片给与一种什么感觉");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -134,6 +161,8 @@ function App() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [rightTab, setRightTab] = useState<RightPanelTab>("artifacts");
   const [activeNav, setActiveNav] = useState("chat");
+  const [conversationWidth, setConversationWidth] = useState(360);
+  const [rightPanelWidth, setRightPanelWidth] = useState(410);
 
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
   const selectedAgentIds = activeConversation?.agent_ids.length
@@ -144,6 +173,10 @@ function App() {
     [attachments],
   );
   const pinnedMessages = messages.filter((message) => message.is_pinned);
+  const shellStyle = {
+    "--conversation-width": `${conversationWidth}px`,
+    "--right-panel-width": rightPanelOpen ? `${rightPanelWidth}px` : "0px",
+  } as CSSProperties;
 
   useEffect(() => {
     getAgents().then(setAgents).catch((err: Error) => setError(err.message));
@@ -173,6 +206,9 @@ function App() {
       return;
     }
     reloadConversationDetail(activeConversationId);
+    setOpenConversationIds((current) =>
+      current.includes(activeConversationId) ? current : [...current, activeConversationId].slice(-4),
+    );
   }, [activeConversationId]);
 
   async function reloadConversations(preferredId?: string) {
@@ -298,6 +334,7 @@ function App() {
       content,
       format: "markdown",
       quoted_message_id: quotedMessage?.id,
+      quoted_text: quotedText || quotedMessage?.content,
       attachment_ids: attachmentIds,
     };
 
@@ -312,6 +349,7 @@ function App() {
         activeConversation.id,
         selectedAgentIds,
         quotedMessage?.id,
+        quotedText || quotedMessage?.content,
         attachmentIds,
         selectedModelId,
         undefined,
@@ -321,6 +359,7 @@ function App() {
       applyChatResponse(response);
       setPendingAttachments([]);
       setQuotedMessage(null);
+      setQuotedText("");
       await reloadConversations(activeConversation.id);
     } catch (err) {
       setProgressSteps((current) => markProgressError(current, err instanceof Error ? err.message : "Send failed"));
@@ -346,6 +385,7 @@ function App() {
         lastUserMessage.content,
         activeConversation.id,
         selectedAgentIds,
+        lastUserMessage.id,
         selectedModelId,
         undefined,
         agentMode,
@@ -391,12 +431,81 @@ function App() {
     }
   }
 
+  async function handleCreateAgent(event: FormEvent) {
+    event.preventDefault();
+    if (!agentDraft.name?.trim()) {
+      setError("Agent name is required");
+      return;
+    }
+    const agent = await createAgent(agentDraft);
+    setAgents((current) => [...current, agent]);
+    setAgentDraft({
+      name: "",
+      description: "",
+      system_prompt: "",
+      capabilities: ["text"],
+      tools: [],
+    });
+    setToast("Agent 已创建");
+  }
+
+  function openCodeEditor(artifact: Artifact) {
+    setEditArtifact(artifact);
+    setEditDraft(artifact.content ?? "");
+  }
+
+  async function handleSaveArtifact() {
+    if (!editArtifact) {
+      return;
+    }
+    const updated = await updateArtifact(editArtifact.id, {
+      content: editDraft,
+      language: editArtifact.language,
+      title: editArtifact.title,
+    });
+    setArtifacts((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    setEditArtifact(updated);
+    setToast("代码已保存，版本已记录");
+  }
+
+  async function handleRestoreArtifactVersion(artifact: Artifact, versionId: string) {
+    const updated = await restoreArtifactVersion(artifact.id, versionId);
+    setArtifacts((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    setToast("版本已恢复");
+  }
+
+  function startPaneResize(pane: "conversation" | "right", event: ReactMouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startConversationWidth = conversationWidth;
+    const startRightPanelWidth = rightPanelWidth;
+    document.body.classList.add("is-resizing");
+
+    function handleMove(moveEvent: MouseEvent) {
+      const delta = moveEvent.clientX - startX;
+      if (pane === "conversation") {
+        setConversationWidth(clamp(startConversationWidth + delta, 280, 480));
+      } else {
+        setRightPanelWidth(clamp(startRightPanelWidth - delta, 320, 620));
+      }
+    }
+
+    function handleUp() {
+      document.body.classList.remove("is-resizing");
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    }
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  }
+
   function toggleToolPreference(key: keyof ToolPreferences) {
     setToolPreferences((current) => ({ ...current, [key]: !current[key] }));
   }
 
   return (
-    <main className={`app-shell ${rightPanelOpen ? "with-right-panel" : "right-panel-collapsed"}`}>
+    <main className={`app-shell ${rightPanelOpen ? "with-right-panel" : "right-panel-collapsed"}`} style={shellStyle}>
       <nav className="rail">
         <div className="rail-logo">AH</div>
         {[
@@ -494,6 +603,12 @@ function App() {
           ))}
         </section>
       </aside>
+      <button
+        aria-label="调整会话列表宽度"
+        className="pane-resizer conversation-resizer"
+        type="button"
+        onMouseDown={(event) => startPaneResize("conversation", event)}
+      />
 
       <section className="chat-panel">
         <header className="chat-header">
@@ -510,6 +625,24 @@ function App() {
           </div>
         </header>
 
+        {openConversationIds.length ? (
+          <section className="conversation-tabs">
+            {openConversationIds.map((id) => {
+              const conversation = conversations.find((item) => item.id === id);
+              return (
+                <button
+                  className={id === activeConversationId ? "active" : ""}
+                  key={id}
+                  type="button"
+                  onClick={() => setActiveConversationId(id)}
+                >
+                  {conversation?.title ?? id}
+                </button>
+              );
+            })}
+          </section>
+        ) : null}
+
         <section className="chat-stream">
           {messages.length === 0 ? (
             <div className="empty-state">{labels.emptyTitle}</div>
@@ -521,7 +654,14 @@ function App() {
                 labels={labels}
                 message={message}
                 onPin={() => handleMessagePin(message)}
-                onQuote={() => setQuotedMessage(message)}
+                onQuote={() => {
+                  setQuotedMessage(message);
+                  setQuotedText("");
+                }}
+                onQuoteSelected={(text) => {
+                  setQuotedMessage(message);
+                  setQuotedText(text);
+                }}
                 onToast={setToast}
               />
             ))
@@ -532,8 +672,8 @@ function App() {
         <form className="composer" onSubmit={handleSubmit}>
           {quotedMessage ? (
             <div className="quote-banner">
-              <span>{labels.quoted}: {quotedMessage.content.slice(0, 120)}</span>
-              <button type="button" onClick={() => setQuotedMessage(null)}>{labels.clear}</button>
+              <span>{labels.quoted}: {(quotedText || quotedMessage.content).slice(0, 160)}</span>
+              <button type="button" onClick={() => { setQuotedMessage(null); setQuotedText(""); }}>{labels.clear}</button>
             </div>
           ) : null}
           {pendingAttachments.length ? (
@@ -586,6 +726,12 @@ function App() {
         </form>
       </section>
 
+      <button
+        aria-label="调整右侧面板宽度"
+        className="pane-resizer right-resizer"
+        type="button"
+        onMouseDown={(event) => startPaneResize("right", event)}
+      />
       <aside className={`right-panel ${rightPanelOpen ? "open" : ""}`}>
         <div className="right-tabs">
           {(["artifacts", "agents", "tools", "context"] as RightPanelTab[]).map((tab) => (
@@ -601,8 +747,13 @@ function App() {
           attachments={attachments}
           labels={labels}
           onApply={handleApplyDiff}
+          onCreateAgent={handleCreateAgent}
+          onEdit={openCodeEditor}
           onPreview={setPreviewArtifact}
+          onRestoreVersion={handleRestoreArtifactVersion}
           onToast={setToast}
+          agentDraft={agentDraft}
+          setAgentDraft={setAgentDraft}
           pinnedMessages={pinnedMessages}
           selectedAgentIds={selectedAgentIds}
           tab={rightTab}
@@ -621,6 +772,24 @@ function App() {
           </div>
         </div>
       ) : null}
+      {editArtifact ? (
+        <div className="preview-modal" role="dialog" aria-modal="true">
+          <div className="editor-card">
+            <header>
+              <div>
+                <h2>{editArtifact.title}</h2>
+                <small>{editArtifact.language ?? "text"} · {editArtifact.file_path ?? editArtifact.id}</small>
+              </div>
+              <button type="button" onClick={() => setEditArtifact(null)}>{labels.close}</button>
+            </header>
+            <textarea value={editDraft} onChange={(event) => setEditDraft(event.target.value)} />
+            <footer>
+              <button type="button" onClick={() => navigator.clipboard.writeText(editDraft).then(() => setToast(labels.copied))}>{labels.copy}</button>
+              <button type="button" onClick={handleSaveArtifact}>{labels.save}</button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
       {toast ? <div className="toast">{toast}</div> : null}
     </main>
   );
@@ -632,6 +801,7 @@ function MessageCard({
   message,
   onPin,
   onQuote,
+  onQuoteSelected,
   onToast,
 }: {
   attachmentMap: Map<string, Attachment>;
@@ -639,6 +809,7 @@ function MessageCard({
   message: ChatMessage;
   onPin: () => void;
   onQuote: () => void;
+  onQuoteSelected: (text: string) => void;
   onToast: (message: string) => void;
 }) {
   const messageAttachments = (message.attachment_ids ?? [])
@@ -654,10 +825,21 @@ function MessageCard({
           <strong>{sender}</strong>
           <div className="message-actions">
             <button type="button" onClick={onQuote}>{t.quote}</button>
+            <button type="button" onClick={() => {
+              const selected = window.getSelection()?.toString().trim() ?? "";
+              if (selected) {
+                onQuoteSelected(selected);
+              } else {
+                onQuote();
+              }
+            }}>{t.selectedQuote}</button>
             <button type="button" onClick={onPin}>{message.is_pinned ? t.unpinMessage : t.pinMessage}</button>
           </div>
         </header>
-        {message.quoted_message_id ? <small className="quoted-line">{t.quoted}: {message.quoted_message_id}</small> : null}
+        {message.quoted_message_id || message.quoted_text ? <small className="quoted-line">{t.quoted}: {message.quoted_text || message.quoted_message_id}</small> : null}
+        {message.generation_index && message.generation_index > 1 ? (
+          <small className="quoted-line">版本 {message.generation_index}{message.is_active_generation === false ? "（旧版）" : ""}</small>
+        ) : null}
         <MarkdownMessage content={message.content} copyLabel={t.copy} copiedLabel={t.copied} onToast={onToast} />
         {messageAttachments.length ? <AttachmentList attachments={messageAttachments} /> : null}
       </div>
@@ -713,40 +895,93 @@ function ProgressPanel({ steps }: { steps: ProgressStep[] }) {
 
 function RightPanelContent({
   activeConversation,
+  agentDraft,
   agents,
   artifacts,
   attachments,
   labels: t,
   onApply,
+  onCreateAgent,
+  onEdit,
   onPreview,
+  onRestoreVersion,
   onToast,
   pinnedMessages,
   selectedAgentIds,
   tab,
   tools,
+  setAgentDraft,
 }: {
   activeConversation?: Conversation;
+  agentDraft: AgentCreateInput;
   agents: Agent[];
   artifacts: Artifact[];
   attachments: Attachment[];
   labels: typeof labels;
   onApply: (artifact: Artifact) => void;
+  onCreateAgent: (event: FormEvent) => void;
+  onEdit: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
+  onRestoreVersion: (artifact: Artifact, versionId: string) => void;
   onToast: (message: string) => void;
   pinnedMessages: ChatMessage[];
   selectedAgentIds: string[];
   tab: RightPanelTab;
   tools: ToolOption[];
+  setAgentDraft: Dispatch<SetStateAction<AgentCreateInput>>;
 }) {
   if (tab === "agents") {
-    const selected = agents.filter((agent) => selectedAgentIds.includes(agent.id));
+    const selected = agents;
     return (
       <div className="right-content">
+        <form className="side-card agent-create-form" onSubmit={onCreateAgent}>
+          <strong>{t.createAgent}</strong>
+          <input
+            value={agentDraft.name ?? ""}
+            onChange={(event) => setAgentDraft((current) => ({ ...current, name: event.target.value }))}
+            placeholder="Agent name"
+          />
+          <input
+            value={agentDraft.description ?? ""}
+            onChange={(event) => setAgentDraft((current) => ({ ...current, description: event.target.value }))}
+            placeholder="Description"
+          />
+          <textarea
+            value={agentDraft.system_prompt ?? ""}
+            onChange={(event) => setAgentDraft((current) => ({ ...current, system_prompt: event.target.value }))}
+            placeholder={t.systemPrompt}
+          />
+          <div className="agent-picker">
+            {tools.map((tool) => (
+              <label key={tool.id}>
+                <input
+                  checked={(agentDraft.tools ?? []).includes(tool.id)}
+                  type="checkbox"
+                  onChange={() =>
+                    setAgentDraft((current) => {
+                      const currentTools = current.tools ?? [];
+                      return {
+                        ...current,
+                        tools: currentTools.includes(tool.id)
+                          ? currentTools.filter((item) => item !== tool.id)
+                          : [...currentTools, tool.id],
+                      };
+                    })
+                  }
+                />
+                <span>{tool.name ?? tool.id}</span>
+              </label>
+            ))}
+          </div>
+          <button type="submit">{t.createAgent}</button>
+        </form>
         {selected.map((agent) => (
           <section className="side-card" key={agent.id}>
             <strong>{agent.name}</strong>
             <p>{agent.description}</p>
             <TagRow items={agent.capabilities ?? []} />
+            {agent.is_custom ? <small>Custom Agent</small> : null}
+            {agent.system_prompt ? <small>Prompt: {agent.system_prompt.slice(0, 120)}</small> : null}
             <small>Model: {agent.model_provider ?? "conversation model"}</small>
             <small>Skills: {(agent.skills ?? []).join(", ") || "none"}</small>
             <small>Tools: {(agent.tools ?? []).join(", ") || "none"}</small>
@@ -795,7 +1030,16 @@ function RightPanelContent({
         <section className="side-card"><p>{t.noArtifacts}</p></section>
       ) : (
         artifacts.map((artifact) => (
-          <ArtifactCard artifact={artifact} key={artifact.id} labels={t} onApply={() => onApply(artifact)} onPreview={() => onPreview(artifact)} onToast={onToast} />
+          <ArtifactCard
+            artifact={artifact}
+            key={artifact.id}
+            labels={t}
+            onApply={() => onApply(artifact)}
+            onEdit={() => onEdit(artifact)}
+            onPreview={() => onPreview(artifact)}
+            onRestoreVersion={(versionId) => onRestoreVersion(artifact, versionId)}
+            onToast={onToast}
+          />
         ))
       )}
     </div>
@@ -806,18 +1050,41 @@ function ArtifactCard({
   artifact,
   labels: t,
   onApply,
+  onEdit,
   onPreview,
+  onRestoreVersion,
   onToast,
 }: {
   artifact: Artifact;
   labels: typeof labels;
   onApply: () => void;
+  onEdit: () => void;
   onPreview: () => void;
+  onRestoreVersion: (versionId: string) => void;
   onToast: (message: string) => void;
 }) {
+  const [diff, setDiff] = useState<StructuredDiff | null>(null);
+  const [versions, setVersions] = useState<ArtifactVersion[]>([]);
+
   async function handleCopy() {
     await navigator.clipboard.writeText(artifact.content ?? artifact.preview_url ?? "");
     onToast(t.copied);
+  }
+
+  async function handleToggleDiff() {
+    if (diff) {
+      setDiff(null);
+      return;
+    }
+    setDiff(await getArtifactDiff(artifact.id));
+  }
+
+  async function handleToggleVersions() {
+    if (versions.length) {
+      setVersions([]);
+      return;
+    }
+    setVersions(await getArtifactVersions(artifact.id));
   }
 
   return (
@@ -826,9 +1093,35 @@ function ArtifactCard({
         <span>{artifact.type}</span>
         <strong>{artifact.title}</strong>
       </header>
+      {artifact.type === "deployment" ? (
+        <div className="deployment-card">
+          <strong>{artifact.status ?? "success"}</strong>
+          <p>{artifact.logs ?? artifact.content}</p>
+          {artifact.preview_url ? <a href={`${API_ORIGIN}${artifact.preview_url}`} target="_blank" rel="noreferrer">{t.deployOpen}</a> : null}
+        </div>
+      ) : null}
+      {artifact.type === "document_preview" || artifact.type === "presentation_preview" ? (
+        <div className="deployment-card">
+          <p>{artifact.content}</p>
+          {artifact.preview_url ? <a href={`${API_ORIGIN}${artifact.preview_url}`} target="_blank" rel="noreferrer">{t.preview}</a> : null}
+        </div>
+      ) : null}
       {artifact.content ? <pre>{artifact.content}</pre> : null}
+      {diff ? <DiffViewer diff={diff} /> : null}
+      {versions.length ? (
+        <div className="version-list">
+          {versions.map((version) => (
+            <button key={version.id} type="button" onClick={() => onRestoreVersion(version.id)}>
+              {t.restore} {version.reason} · {new Date(version.created_at).toLocaleString()}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <footer>
         {artifact.content ? <button type="button" onClick={handleCopy}>{t.copy}</button> : null}
+        {artifact.type === "code" ? <button type="button" onClick={onEdit}>{t.edit}</button> : null}
+        {artifact.content ? <button type="button" onClick={handleToggleVersions}>{t.versions}</button> : null}
+        {artifact.type === "diff" ? <button type="button" onClick={handleToggleDiff}>{t.viewDiff}</button> : null}
         {artifact.preview_url ? <button type="button" onClick={onPreview}>{t.preview}</button> : null}
         {artifact.type === "diff" ? (
           <button disabled={artifact.status === "applied"} type="button" onClick={onApply}>
@@ -861,6 +1154,30 @@ function MarkdownMessage({
           renderTextBlock(block.content, index)
         ),
       )}
+    </div>
+  );
+}
+
+function DiffViewer({ diff }: { diff: StructuredDiff }) {
+  return (
+    <div className="diff-viewer">
+      {diff.files.map((file) => (
+        <section key={`${file.old_path}-${file.new_path}`}>
+          <strong>{file.new_path}</strong>
+          {file.hunks.map((hunk) => (
+            <div className="diff-hunk" key={hunk.header}>
+              <small>{hunk.header}</small>
+              {hunk.lines.map((line, index) => (
+                <div className={`diff-line ${line.type}`} key={`${hunk.header}-${index}`}>
+                  <span>{line.old_no ?? ""}</span>
+                  <span>{line.new_no ?? ""}</span>
+                  <code>{line.type === "add" ? "+" : line.type === "remove" ? "-" : " "}{line.content}</code>
+                </div>
+              ))}
+            </div>
+          ))}
+        </section>
+      ))}
     </div>
   );
 }
@@ -1054,6 +1371,10 @@ function loadImage(file: File): Promise<HTMLImageElement> {
     image.onerror = () => reject(new Error("Image load failed"));
     image.src = URL.createObjectURL(file);
   });
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function formatRelativeTime(value: string): string {

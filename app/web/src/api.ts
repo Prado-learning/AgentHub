@@ -1,6 +1,8 @@
 import type {
   Agent,
+  AgentCreateInput,
   Artifact,
+  ArtifactVersion,
   Attachment,
   ChatMessage,
   ChatResponse,
@@ -8,6 +10,7 @@ import type {
   ConversationCreateInput,
   ConversationUpdateInput,
   ModelOption,
+  StructuredDiff,
   ToolOption,
   ToolPreferences,
 } from "./types";
@@ -36,6 +39,7 @@ export function sendChatMessage(
   conversationId: string,
   selectedAgents: string[],
   quotedMessageId?: string,
+  quotedText?: string,
   attachmentIds: string[] = [],
   modelProvider?: string,
   modelName?: string,
@@ -51,6 +55,7 @@ export function sendChatMessage(
         content,
         format: "markdown",
         quoted_message_id: quotedMessageId,
+        quoted_text: quotedText,
         attachment_ids: attachmentIds,
       },
       selected_agents: selectedAgents,
@@ -66,6 +71,7 @@ export function regenerateChatMessage(
   content: string,
   conversationId: string,
   selectedAgents: string[],
+  regenerateFromMessageId?: string,
   modelProvider?: string,
   modelName?: string,
   agentMode?: "single" | "multi",
@@ -81,6 +87,7 @@ export function regenerateChatMessage(
         format: "markdown",
       },
       selected_agents: selectedAgents,
+      regenerate_from_message_id: regenerateFromMessageId,
       model_provider: modelProvider,
       model_name: modelName,
       agent_mode: agentMode,
@@ -92,6 +99,14 @@ export function regenerateChatMessage(
 export async function getAgents(): Promise<Agent[]> {
   const data = await request<{ agents: Agent[] }>("/agents");
   return data.agents;
+}
+
+export async function createAgent(input: AgentCreateInput): Promise<Agent> {
+  const data = await request<{ agent: Agent }>("/agents", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return data.agent;
 }
 
 export async function getModels(): Promise<ModelOption[]> {
@@ -260,5 +275,36 @@ export async function applyArtifactDiff(artifactId: string): Promise<{
     };
   }>(`/artifacts/${artifactId}/apply`, { method: "POST" });
   return data.application;
+}
+
+export async function updateArtifact(
+  artifactId: string,
+  input: { title?: string; content?: string; language?: string },
+): Promise<Artifact> {
+  const data = await request<{ artifact: Artifact }>(`/artifacts/${artifactId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  return data.artifact;
+}
+
+export async function getArtifactVersions(artifactId: string): Promise<ArtifactVersion[]> {
+  const data = await request<{ versions: ArtifactVersion[] }>(`/artifacts/${artifactId}/versions`);
+  return data.versions;
+}
+
+export async function restoreArtifactVersion(
+  artifactId: string,
+  versionId: string,
+): Promise<Artifact> {
+  const data = await request<{ artifact: Artifact }>(
+    `/artifacts/${artifactId}/versions/${versionId}/restore`,
+    { method: "POST" },
+  );
+  return data.artifact;
+}
+
+export async function getArtifactDiff(artifactId: string): Promise<StructuredDiff> {
+  return request<StructuredDiff>(`/artifacts/${artifactId}/diff`);
 }
 

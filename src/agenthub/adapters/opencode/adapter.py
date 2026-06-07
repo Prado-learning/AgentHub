@@ -1,0 +1,2 @@
+﻿"""OpenCode adapter placeholder."""
+

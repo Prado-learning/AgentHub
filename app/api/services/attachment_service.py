@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import binascii
@@ -136,3 +136,4 @@ def _public_attachment(attachment: dict) -> dict:
         for key, value in attachment.items()
         if key != "file_path"
     }
+

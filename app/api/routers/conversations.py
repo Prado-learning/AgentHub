@@ -1,4 +1,4 @@
-from typing import Literal
+﻿from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -124,3 +124,4 @@ def unpin_message(conversation_id: str, message_id: str) -> dict:
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
     return {"message": message}
+

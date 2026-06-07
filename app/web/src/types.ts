@@ -5,8 +5,11 @@ export type Agent = {
   capabilities?: string[];
   tools?: string[];
   skills?: string[];
+  system_prompt?: string;
   model_provider?: string;
   model_name?: string;
+  avatar?: string;
+  is_custom?: boolean;
 };
 
 export type ToolOption = {
@@ -45,7 +48,14 @@ export type ChatMessage = {
   format: string;
   artifact_ids?: string[];
   quoted_message_id?: string | null;
+  quoted_text?: string | null;
+  quoted_artifact_id?: string | null;
+  quoted_range?: Record<string, unknown> | null;
   attachment_ids?: string[];
+  generation_group_id?: string | null;
+  generation_index?: number | null;
+  replaces_message_ids?: string[];
+  is_active_generation?: boolean;
   is_pinned?: boolean;
   created_at?: string;
 };
@@ -63,7 +73,17 @@ export type Attachment = {
 
 export type Artifact = {
   id: string;
-  type: "code" | "review" | "preview" | "conflict" | "diff" | "file" | "image";
+  type:
+    | "code"
+    | "review"
+    | "preview"
+    | "conflict"
+    | "diff"
+    | "file"
+    | "image"
+    | "deployment"
+    | "document_preview"
+    | "presentation_preview";
   title: string;
   language?: string;
   content?: string;
@@ -75,6 +95,41 @@ export type Artifact = {
   status?: "pending" | "applied" | "failed" | "rolled_back";
   apply_id?: string;
   target_files?: string[];
+  deployment_id?: string;
+  deployment_url?: string;
+  logs?: string;
+  source_attachment_id?: string;
+  mime_type?: string;
+  filename?: string;
+};
+
+export type ArtifactVersion = {
+  id: string;
+  artifact_id: string;
+  title?: string;
+  language?: string;
+  content: string;
+  reason: string;
+  created_at: string;
+};
+
+export type StructuredDiffLine = {
+  type: "context" | "add" | "remove";
+  old_no?: number | null;
+  new_no?: number | null;
+  content: string;
+};
+
+export type StructuredDiff = {
+  artifact_id: string;
+  files: Array<{
+    old_path: string;
+    new_path: string;
+    hunks: Array<{
+      header: string;
+      lines: StructuredDiffLine[];
+    }>;
+  }>;
 };
 
 export type ChatResponse = {
@@ -106,5 +161,17 @@ export type ConversationUpdateInput = {
   title?: string;
   mode?: ConversationMode;
   agent_ids?: string[];
+};
+
+export type AgentCreateInput = {
+  id?: string;
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  capabilities?: string[];
+  tools?: string[];
+  model_provider?: string;
+  model_name?: string;
+  avatar?: string;
 };
 

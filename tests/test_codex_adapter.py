@@ -1,6 +1,6 @@
-from agenthub_harness.adapters import CodexAdapter, build_agent_adapters
-from agenthub_harness.adapters.base import AgentTask
-from agenthub_harness.core.context import RunContext
+﻿from agenthub.adapters import CodexAdapter, build_agent_adapters
+from agenthub.adapters.base import AgentTask
+from agenthub.domain.run import RunContext
 
 
 def test_codex_adapter_returns_markdown_and_code_artifact(monkeypatch) -> None:
@@ -37,3 +37,4 @@ def test_factory_builds_codex_adapter_from_config() -> None:
     )
 
     assert isinstance(adapters["codex"], CodexAdapter)
+

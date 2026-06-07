@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 import shutil
@@ -81,6 +81,19 @@ def apply_diff_artifact(artifact_id: str) -> dict:
     return record
 
 
+def get_structured_diff(artifact_id: str) -> dict:
+    artifact = get_artifact(artifact_id)
+    if artifact is None:
+        raise ValueError("Artifact not found")
+    if artifact.get("type") != "diff":
+        raise ValueError("Artifact is not a diff")
+    patches = _parse_unified_diff(str(artifact.get("content") or ""))
+    return {
+        "artifact_id": artifact_id,
+        "files": [_structured_patch(patch) for patch in patches],
+    }
+
+
 def rollback_diff_application(apply_id: str) -> dict:
     records = APPLICATIONS.read()
     for record in records:
@@ -123,6 +136,35 @@ def _parse_unified_diff(content: str) -> list[FilePatch]:
             current_hunk.append(line)
 
     return patches
+
+
+def _structured_patch(patch: FilePatch) -> dict:
+    files = {
+        "old_path": patch.old_path,
+        "new_path": patch.new_path,
+        "hunks": [],
+    }
+    for hunk in patch.hunks:
+        header = hunk[0]
+        match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", header)
+        old_no = int(match.group(1)) if match else None
+        new_no = int(match.group(2)) if match else None
+        lines: list[dict] = []
+        for raw_line in hunk[1:]:
+            marker = raw_line[:1]
+            content = raw_line[1:] if marker in {" ", "+", "-"} else raw_line
+            if marker == " ":
+                lines.append({"type": "context", "old_no": old_no, "new_no": new_no, "content": content})
+                old_no = old_no + 1 if old_no is not None else None
+                new_no = new_no + 1 if new_no is not None else None
+            elif marker == "-":
+                lines.append({"type": "remove", "old_no": old_no, "new_no": None, "content": content})
+                old_no = old_no + 1 if old_no is not None else None
+            elif marker == "+":
+                lines.append({"type": "add", "old_no": None, "new_no": new_no, "content": content})
+                new_no = new_no + 1 if new_no is not None else None
+        files["hunks"].append({"header": header, "lines": lines})
+    return files
 
 
 def _apply_file_patch(original_text: str, patch: FilePatch) -> str:
@@ -196,3 +238,4 @@ def _restore_backups(backups: list[dict]) -> None:
         if backup_path.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup_path, target)
+

@@ -1,8 +1,8 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from app.api.services import artifact_service
 from app.api.services.conversation_store import JsonStore
-from agenthub_harness.skills.loader import load_skills_for_agent
+from agenthub.skills.loader import load_skills_for_agent
 
 
 def test_loads_agent_skill_markdown() -> None:
@@ -40,3 +40,4 @@ def test_artifacts_are_persisted_with_preview_html(
     assert saved[0]["preview_url"].startswith("/artifacts/")
     assert "preview_html" not in saved[0]
     assert artifact_service.get_preview_html(saved[0]["id"]) == "<html><body>hello</body></html>"
+

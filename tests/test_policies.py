@@ -1,4 +1,4 @@
-from agenthub_harness.policies import AgentPolicy, RunPolicy, ToolPolicy
+﻿from agenthub.policies import AgentPolicy, RunPolicy, ToolPolicy
 
 
 def test_agent_policy_allows_configured_agent() -> None:
@@ -20,4 +20,5 @@ def test_run_policy_limits_steps() -> None:
     assert policy.allows_step(0)
     assert policy.allows_step(1)
     assert not policy.allows_step(2)
+
 

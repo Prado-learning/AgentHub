@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -24,4 +24,5 @@ class JsonStore:
                 json.dumps(records, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+
 

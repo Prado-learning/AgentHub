@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -82,4 +82,5 @@ def test_conversation_messages_return_empty_list_for_new_conversation(
 
     assert response.status_code == 200
     assert response.json() == {"messages": []}
+
 

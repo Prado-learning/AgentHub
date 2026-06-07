@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -61,3 +61,4 @@ def read_attachment_content(attachment_id: str) -> FileResponse:
         media_type=attachment.get("mime_type") or "application/octet-stream",
         filename=attachment.get("filename") or attachment_id,
     )
+

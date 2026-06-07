@@ -1,4 +1,4 @@
-from agenthub_harness.artifacts.conflict_resolver import resolve_artifact_conflicts
+﻿from agenthub.artifacts.conflict_resolver import resolve_artifact_conflicts
 
 
 def test_conflict_resolver_dedupes_artifact_ids() -> None:
@@ -37,3 +37,4 @@ def test_conflict_resolver_emits_file_path_conflict_artifact() -> None:
 
     assert conflicts[0].target == "TodoList.tsx"
     assert artifacts[-1]["type"] == "conflict"
+

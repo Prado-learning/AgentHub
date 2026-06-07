@@ -1,0 +1,2 @@
+﻿"""OpenCode adapter package placeholder."""
+

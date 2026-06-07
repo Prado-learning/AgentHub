@@ -1,4 +1,4 @@
-from typing import Literal
+﻿from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -14,6 +14,9 @@ class ChatMessage(BaseModel):
     content: str
     format: str = "markdown"
     quoted_message_id: str | None = None
+    quoted_text: str | None = None
+    quoted_artifact_id: str | None = None
+    quoted_range: dict | None = None
     attachment_ids: list[str] = Field(default_factory=list)
 
 
@@ -25,6 +28,7 @@ class ChatRequest(BaseModel):
     model_name: str | None = None
     agent_mode: Literal["single", "multi"] | None = None
     tool_preferences: dict[str, bool] = Field(default_factory=dict)
+    regenerate_from_message_id: str | None = None
 
 
 @router.post("/chat")
@@ -41,4 +45,5 @@ def regenerate_chat(request: ChatRequest) -> dict:
         return build_chat_response(request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 

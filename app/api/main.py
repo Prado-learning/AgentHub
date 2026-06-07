@@ -1,7 +1,7 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import agents, artifacts, attachments, chat, conversations
+from app.api.routers import agents, artifacts, attachments, chat, conversations, deployments
 
 
 app = FastAPI(title="AgentHub Demo API", version="0.1.0")
@@ -24,9 +24,11 @@ app.include_router(conversations.router)
 app.include_router(agents.router)
 app.include_router(artifacts.router)
 app.include_router(attachments.router)
+app.include_router(deployments.router)
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
 

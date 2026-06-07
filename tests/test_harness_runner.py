@@ -1,7 +1,7 @@
-from agenthub_harness import HarnessRunner
-from agenthub_harness.adapters.base import AgentResult, AgentTask
-from agenthub_harness.core.context import RunContext
-from agenthub_harness.core.result import RunResult
+﻿from agenthub import HarnessRunner
+from agenthub.adapters.base import AgentResult, AgentTask
+from agenthub.domain.run import RunContext
+from agenthub.domain.run import RunResult
 
 
 def test_harness_runner_accepts_context() -> None:
@@ -98,4 +98,5 @@ def test_harness_runner_maps_prompt_for_ui_builder_tool_mentions() -> None:
     assert result.status == "success"
     assert any(artifact["type"] == "code" for artifact in result.artifacts)
     assert "build a profile card" in result.artifacts[0]["content"]
+
 

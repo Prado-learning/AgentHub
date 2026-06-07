@@ -39,7 +39,7 @@ def test_chat_returns_runner_agents_artifacts_and_persists_history(
             "conversation_id": "conv_demo",
             "message": {
                 "role": "user",
-                "content": "帮我做一个 Todo List 页面",
+                "content": "甯垜鍋氫竴涓?Todo List 椤甸潰",
                 "format": "markdown",
             },
             "selected_agents": ["orchestrator", "ui_builder", "code_reviewer"],
@@ -64,7 +64,8 @@ def test_agents_endpoint() -> None:
     response = client.get("/agents")
 
     assert response.status_code == 200
-    assert [agent["id"] for agent in response.json()["agents"]] == [
+    agent_ids = [agent["id"] for agent in response.json()["agents"]]
+    assert agent_ids[:6] == [
         "orchestrator",
         "codex",
         "ui_builder",
@@ -91,4 +92,5 @@ def test_preview_endpoint_returns_html() -> None:
 
     assert response.status_code == 200
     assert "Todo List" in response.text
+
 

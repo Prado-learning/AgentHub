@@ -1,0 +1,15 @@
+skills:
+  - id: orchestrator
+    path: skills/orchestrator.md
+  - id: code_agent
+    path: skills/code_agent.md
+  - id: ui_builder
+    path: skills/ui_builder.md
+  - id: code_review
+    path: skills/code_review.md
+  - id: file_analyst
+    path: skills/file_analyst.md
+  - id: vision_agent
+    path: skills/vision_agent.md
+  - id: preview
+    path: skills/preview.md

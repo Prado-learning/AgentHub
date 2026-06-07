@@ -1,5 +1,5 @@
-from agenthub_harness.core.context import RunContext
-from agenthub_harness.runtime.orchestrator import Orchestrator
+﻿from agenthub.domain.run import RunContext
+from agenthub.orchestration.rule_planner import Orchestrator
 
 
 class FakePlannerProvider:
@@ -153,3 +153,4 @@ def test_orchestrator_falls_back_when_llm_planner_returns_invalid_json() -> None
 
     assert plan.reason == "rule based auto dispatch"
     assert [step.agent_id for step in plan.steps] == ["ui_builder", "code_reviewer"]
+

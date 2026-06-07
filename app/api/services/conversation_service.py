@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
@@ -149,7 +149,14 @@ def add_message(
     format: str = "markdown",
     artifact_ids: list[str] | None = None,
     quoted_message_id: str | None = None,
+    quoted_text: str | None = None,
+    quoted_artifact_id: str | None = None,
+    quoted_range: dict | None = None,
     attachment_ids: list[str] | None = None,
+    generation_group_id: str | None = None,
+    generation_index: int | None = None,
+    replaces_message_ids: list[str] | None = None,
+    is_active_generation: bool = True,
 ) -> dict:
     ensure_default_conversation()
     now = utc_now()
@@ -162,7 +169,14 @@ def add_message(
         "format": format,
         "artifact_ids": artifact_ids or [],
         "quoted_message_id": quoted_message_id,
+        "quoted_text": quoted_text,
+        "quoted_artifact_id": quoted_artifact_id,
+        "quoted_range": quoted_range,
         "attachment_ids": attachment_ids or [],
+        "generation_group_id": generation_group_id,
+        "generation_index": generation_index,
+        "replaces_message_ids": replaces_message_ids or [],
+        "is_active_generation": is_active_generation,
         "is_pinned": False,
         "created_at": now,
     }
@@ -235,6 +249,32 @@ def list_pinned_messages(conversation_id: str) -> list[dict]:
     ]
 
 
+def deactivate_generation_group(conversation_id: str, generation_group_id: str) -> list[str]:
+    messages = MESSAGES.read()
+    replaced: list[str] = []
+    for message in messages:
+        if (
+            message.get("conversation_id") == conversation_id
+            and message.get("generation_group_id") == generation_group_id
+            and message.get("role") == "agent"
+            and message.get("is_active_generation", True)
+        ):
+            message["is_active_generation"] = False
+            replaced.append(str(message.get("id")))
+    if replaced:
+        MESSAGES.write(messages)
+    return replaced
+
+
+def next_generation_index(conversation_id: str, generation_group_id: str) -> int:
+    indexes = [
+        int(message.get("generation_index") or 0)
+        for message in list_messages(conversation_id)
+        if message.get("generation_group_id") == generation_group_id
+    ]
+    return (max(indexes) if indexes else 0) + 1
+
+
 def _summarize_message(content: str, limit: int = 96) -> str:
     text = re.sub(r"```[\s\S]*?```", " code block ", content)
     text = re.sub(r"[*_#>`~-]+", " ", text)
@@ -242,3 +282,4 @@ def _summarize_message(content: str, limit: int = 96) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit].rstrip()}..."
+

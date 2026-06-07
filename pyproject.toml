@@ -22,7 +22,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["agenthub_harness*", "app*"]
+include = ["agenthub*", "app*"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]

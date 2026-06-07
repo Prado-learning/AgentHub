@@ -1,0 +1,83 @@
+agents:
+  - id: orchestrator
+    name: Orchestrator
+    type: system
+    adapter: openai_chat
+    description: Understands intent, plans work, routes agents and summarizes outcomes.
+    capabilities:
+      - planning
+      - text
+      - routing
+      - aggregation
+    skills:
+      - skills/orchestrator.md
+    tools:
+      - file_reader_tool
+      - image_reader_tool
+      - preview_tool
+  - id: codex
+    name: Code Agent
+    type: external_agent
+    adapter: codex
+    description: Writes code, proposes diffs, reads workspace context and explains changes.
+    capabilities:
+      - code
+      - refactor
+      - review
+      - diff
+    skills:
+      - skills/code_agent.md
+    tools:
+      - file_reader_tool
+      - code_review_tool
+  - id: ui_builder
+    name: UI Builder
+    type: builtin
+    adapter: openai_chat
+    description: Builds frontend pages and components, then asks preview tools to render them.
+    capabilities:
+      - code
+      - preview
+      - ui
+    skills:
+      - skills/ui_builder.md
+    tools:
+      - preview_tool
+      - file_reader_tool
+  - id: code_reviewer
+    name: Code Reviewer
+    type: builtin
+    adapter: openai_chat
+    description: Reviews code for bugs, risk, maintainability and missing tests.
+    capabilities:
+      - review
+    skills:
+      - skills/code_review.md
+    tools:
+      - code_review_tool
+  - id: vision_agent
+    name: Vision Agent
+    type: builtin
+    adapter: openai_chat
+    model_provider: doubao
+    description: Analyzes uploaded images, screenshots and visual layout references.
+    capabilities:
+      - vision
+      - image
+      - ui_reference
+    skills:
+      - skills/vision_agent.md
+    tools:
+      - image_reader_tool
+  - id: file_analyst
+    name: File Analyst
+    type: builtin
+    adapter: openai_chat
+    description: Reads attachments and summarizes structured requirements from files.
+    capabilities:
+      - file_read
+      - summarize
+    skills:
+      - skills/file_analyst.md
+    tools:
+      - file_reader_tool

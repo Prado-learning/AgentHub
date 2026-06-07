@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.api.main import app
 from app.api.services import artifact_service, attachment_service, conversation_service, diff_service
 from app.api.services.conversation_store import JsonStore
-from agenthub_harness.tools.image_reader_tool import image_reader_tool
+from agenthub.tools.builtin.image_reader import image_reader_tool
 
 
 client = TestClient(app)
@@ -154,3 +154,4 @@ def test_image_reader_tool_extracts_png_size(tmp_path: Path) -> None:
 
     assert result.type == "image"
     assert "2x3" in result.content
+
