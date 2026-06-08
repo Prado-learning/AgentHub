@@ -35,6 +35,7 @@ def ensure_default_conversation() -> None:
                 "agent_ids": ["orchestrator", "ui_builder", "code_reviewer"],
                 "is_pinned": False,
                 "is_archived": False,
+                "is_trashed": False,
                 "created_at": now,
                 "updated_at": now,
                 "last_message": "",
@@ -44,15 +45,27 @@ def ensure_default_conversation() -> None:
     MESSAGES.write([])
 
 
-def list_conversations(search: str = "", archived: bool = False) -> list[dict]:
+def list_conversations(
+    search: str = "",
+    archived: bool = False,
+    trashed: bool = False,
+) -> list[dict]:
     ensure_default_conversation()
     normalized_search = search.strip().lower()
 
-    conversations = [
-        conversation
-        for conversation in CONVERSATIONS.read()
-        if bool(conversation.get("is_archived")) is archived
-    ]
+    if trashed:
+        conversations = [
+            conversation
+            for conversation in CONVERSATIONS.read()
+            if bool(conversation.get("is_trashed"))
+        ]
+    else:
+        conversations = [
+            conversation
+            for conversation in CONVERSATIONS.read()
+            if not bool(conversation.get("is_trashed"))
+            and bool(conversation.get("is_archived")) is archived
+        ]
 
     if normalized_search:
         conversations = [
@@ -87,6 +100,7 @@ def create_conversation(
         "agent_ids": agent_ids or ["orchestrator"],
         "is_pinned": False,
         "is_archived": False,
+        "is_trashed": False,
         "created_at": now,
         "updated_at": now,
         "last_message": "",
@@ -132,6 +146,41 @@ def set_conversation_archived(conversation_id: str, is_archived: bool) -> dict |
     return _set_conversation_flag(conversation_id, "is_archived", is_archived)
 
 
+def set_conversation_trashed(conversation_id: str, is_trashed: bool) -> dict | None:
+    return _set_conversation_flag(conversation_id, "is_trashed", is_trashed)
+
+
+def delete_conversation(conversation_id: str) -> dict | None:
+    ensure_default_conversation()
+    conversations = CONVERSATIONS.read()
+    deleted_conversation = next(
+        (
+            conversation
+            for conversation in conversations
+            if conversation.get("id") == conversation_id
+        ),
+        None,
+    )
+    if deleted_conversation is None:
+        return None
+
+    CONVERSATIONS.write(
+        [
+            conversation
+            for conversation in conversations
+            if conversation.get("id") != conversation_id
+        ]
+    )
+    MESSAGES.write(
+        [
+            message
+            for message in MESSAGES.read()
+            if message.get("conversation_id") != conversation_id
+        ]
+    )
+    return deleted_conversation
+
+
 def list_messages(conversation_id: str) -> list[dict]:
     ensure_default_conversation()
     return [
@@ -157,6 +206,7 @@ def add_message(
     generation_index: int | None = None,
     replaces_message_ids: list[str] | None = None,
     is_active_generation: bool = True,
+    trace_events: list[dict] | None = None,
 ) -> dict:
     ensure_default_conversation()
     now = utc_now()
@@ -178,6 +228,7 @@ def add_message(
         "replaces_message_ids": replaces_message_ids or [],
         "is_active_generation": is_active_generation,
         "is_pinned": False,
+        "trace_events": trace_events or [],
         "created_at": now,
     }
     messages = MESSAGES.read()
@@ -282,4 +333,3 @@ def _summarize_message(content: str, limit: int = 96) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit].rstrip()}..."
-

@@ -51,6 +51,11 @@ def test_chat_returns_runner_agents_artifacts_and_persists_history(
     assert data["status"] == "success"
     assert len(data["messages"]) == 2
     assert len(data["artifacts"]) == 3
+    assert any(event["type"] == "context.loaded" for event in data["events"])
+    assert any(event["type"] == "run.planned" for event in data["events"])
+    assert any(event["type"] == "agent.completed" for event in data["events"])
+    assert data["messages"][0]["trace_events"]
+    assert data["messages"][0]["trace_events"][0]["title"]
 
     history_response = client.get("/conversations/conv_demo/messages")
     history = history_response.json()["messages"]
@@ -58,6 +63,7 @@ def test_chat_returns_runner_agents_artifacts_and_persists_history(
     assert len(history) == 3
     assert history[0]["role"] == "user"
     assert history[-1]["sender"] == "code_reviewer"
+    assert history[-1]["trace_events"]
 
 
 def test_agents_endpoint() -> None:
@@ -92,5 +98,4 @@ def test_preview_endpoint_returns_html() -> None:
 
     assert response.status_code == 200
     assert "Todo List" in response.text
-
 

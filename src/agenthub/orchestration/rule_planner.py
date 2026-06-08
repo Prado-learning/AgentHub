@@ -9,6 +9,7 @@ from agenthub.domain.plan import Plan, PlanStep
 from agenthub.domain.run import RunContext
 from agenthub.infrastructure.config.env import env_flag, load_env_file
 from agenthub.adapters.openai_chat.client import OpenAICompatibleProvider
+from agenthub.runtime.prompt_builder import format_messages_for_prompt
 from agenthub.tools.executor import build_default_tool_registry
 
 
@@ -200,10 +201,7 @@ class Orchestrator:
             return None
 
     def _planner_prompt(self, context: RunContext) -> str:
-        history = "\n".join(
-            f"{item.get('sender') or item.get('role')}: {item.get('content')}"
-            for item in context.history[-8:]
-        )
+        history = format_messages_for_prompt(context.history, limit=8, total_limit=3200)
         return (
             "You are AgentHub Orchestrator. Return only JSON, no markdown.\n"
             "Use the smallest useful number of steps. Do not invent agents or tools.\n"
@@ -397,4 +395,3 @@ class Orchestrator:
             "preview_tool": preferences.get("preview") is False,
         }
         return [tool_id for tool_id in tool_ids if not disabled_by_tool.get(tool_id, False)]
-

@@ -1,10 +1,11 @@
-import { ChangeEvent, CSSProperties, Dispatch, FormEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, CSSProperties, Dispatch, FormEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   applyArtifactDiff,
   archiveConversation,
   createAgent,
   createConversation,
+  deleteConversation,
   getArtifactDiff,
   getArtifactVersions,
   getAgents,
@@ -17,12 +18,15 @@ import {
   pinConversation,
   pinMessage,
   regenerateChatMessage,
+  restoreConversation,
   restoreArtifactVersion,
   sendChatMessage,
+  trashConversation,
   unarchiveConversation,
   unpinConversation,
   unpinMessage,
   updateArtifact,
+  updateConversation,
   uploadAttachment,
 } from "./api";
 import type {
@@ -37,17 +41,19 @@ import type {
   ConversationMode,
   ModelOption,
   StructuredDiff,
+  TraceEvent,
   ToolOption,
   ToolPreferences,
 } from "./types";
 
 const API_ORIGIN = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const TRASH_STORAGE_KEY = "agenthub:trashed-conversations";
 const defaultAgentIds = ["orchestrator", "codex", "ui_builder", "code_reviewer"];
 const defaultToolPreferences: ToolPreferences = {
   file: true,
   image: true,
   preview: true,
-  diff: false,
+  diff: true,
 };
 
 type RightPanelTab = "artifacts" | "agents" | "tools" | "context";
@@ -59,7 +65,7 @@ type ProgressStep = {
 };
 
 const labels = {
-  appTagline: "多 Agent 协作工作台",
+  appTagline: "多智能体（Agent）协作工作台",
   ready: "已就绪",
   running: "运行中",
   active: "活跃",
@@ -73,10 +79,19 @@ const labels = {
   unpin: "取消置顶",
   archive: "归档",
   restore: "恢复",
+  rename: "重命名",
+  delete: "删除",
+  permanentDelete: "永久删除",
+  confirmDeleteTitle: "永久删除对话？",
+  confirmDeleteBody: "删除后无法恢复。",
+  yes: "是",
+  trash: "回收站",
+  trashEmpty: "回收站为空",
+  noConversations: "暂无会话",
   title: "标题",
-  single: "单 Agent",
-  multi: "多 Agent",
-  chooseAgent: "选择 Agent",
+  single: "单智能体（Agent）",
+  multi: "多智能体（Agent）",
+  chooseAgent: "选择智能体（Agent）",
   cancel: "取消",
   create: "创建",
   emptyTitle: "选择或新建一个会话",
@@ -87,12 +102,13 @@ const labels = {
   quote: "引用",
   quoted: "正在引用",
   clear: "清除",
+  thinking: "思考摘要",
   pinMessage: "Pin",
   unpinMessage: "Unpin",
   upload: "上传",
   pendingFiles: "待发送附件",
   artifacts: "产物",
-  agents: "Agents",
+  agents: "智能体（Agents）",
   tools: "Tools",
   context: "Context",
   copy: "复制",
@@ -103,7 +119,7 @@ const labels = {
   edit: "编辑",
   save: "保存",
   versions: "版本",
-  createAgent: "创建 Agent",
+  createAgent: "创建智能体（Agent）",
   systemPrompt: "System Prompt",
   selectedQuote: "引用选中",
   deployOpen: "打开部署",
@@ -129,7 +145,6 @@ function App() {
   const [agentMode, setAgentMode] = useState<"single" | "multi">("single");
   const [toolPreferences, setToolPreferences] = useState<ToolPreferences>(defaultToolPreferences);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [openConversationIds, setOpenConversationIds] = useState<string[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -158,20 +173,57 @@ function App() {
   const [toast, setToast] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightTab, setRightTab] = useState<RightPanelTab>("artifacts");
-  const [activeNav, setActiveNav] = useState("chat");
-  const [conversationWidth, setConversationWidth] = useState(360);
+  const [conversationWidth, setConversationWidth] = useState(280);
   const [rightPanelWidth, setRightPanelWidth] = useState(410);
+  const [trashedConversations, setTrashedConversations] = useState<Conversation[]>(readLegacyTrashedConversations);
+  const [isTrashOpen, setIsTrashOpen] = useState(false);
+  const [deleteTargetConversation, setDeleteTargetConversation] = useState<Conversation | null>(null);
+  const [openConversationMenuId, setOpenConversationMenuId] = useState("");
+  const [renamingConversationId, setRenamingConversationId] = useState("");
+  const [renameDraft, setRenameDraft] = useState("");
+  const [mentionStart, setMentionStart] = useState<number | null>(null);
+  const [mentionQuery, setMentionQuery] = useState("");
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const hasMigratedLegacyTrashRef = useRef(false);
 
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
   const selectedAgentIds = activeConversation?.agent_ids.length
     ? activeConversation.agent_ids
     : draftAgentIds;
+  const trashedConversationIds = useMemo(
+    () => new Set(trashedConversations.map((conversation) => conversation.id)),
+    [trashedConversations],
+  );
+  const visibleConversations = useMemo(
+    () => conversations.filter((conversation) => !trashedConversationIds.has(conversation.id)),
+    [conversations, trashedConversationIds],
+  );
   const attachmentMap = useMemo(
     () => new Map(attachments.map((attachment) => [attachment.id, attachment])),
     [attachments],
   );
+  const mentionAgents = useMemo(() => {
+    if (activeConversation?.mode !== "group") {
+      return [];
+    }
+    const selectedIds = new Set(selectedAgentIds);
+    const selectedAgents = agents.filter((agent) => selectedIds.has(agent.id));
+    return selectedAgents.length ? selectedAgents : agents;
+  }, [activeConversation?.mode, agents, selectedAgentIds]);
+  const mentionCandidates = useMemo(() => {
+    if (mentionStart === null) {
+      return [];
+    }
+    const query = mentionQuery.toLowerCase();
+    return mentionAgents
+      .filter((agent) => {
+        const label = `${agent.id} ${agent.name} ${agent.description}`.toLowerCase();
+        return !query || label.includes(query);
+      })
+      .slice(0, 8);
+  }, [mentionAgents, mentionQuery, mentionStart]);
   const pinnedMessages = messages.filter((message) => message.is_pinned);
   const shellStyle = {
     "--conversation-width": `${conversationWidth}px`,
@@ -195,8 +247,23 @@ function App() {
   }, [toast]);
 
   useEffect(() => {
+    resizeComposerInput();
+  }, [input]);
+
+  useEffect(() => {
+    migrateLegacyTrashToServer();
+  }, []);
+
+  useEffect(() => {
     reloadConversations();
   }, [conversationSearch, showArchived]);
+
+  useEffect(() => {
+    if (!activeConversation) {
+      return;
+    }
+    setAgentMode(activeConversation.mode === "single" ? "single" : "multi");
+  }, [activeConversation?.id, activeConversation?.mode]);
 
   useEffect(() => {
     if (!activeConversationId) {
@@ -206,23 +273,52 @@ function App() {
       return;
     }
     reloadConversationDetail(activeConversationId);
-    setOpenConversationIds((current) =>
-      current.includes(activeConversationId) ? current : [...current, activeConversationId].slice(-4),
-    );
   }, [activeConversationId]);
 
   async function reloadConversations(preferredId?: string) {
-    const items = await getConversations({ search: conversationSearch, archived: showArchived });
+    const [items, trashedItems] = await Promise.all([
+      getConversations({ search: conversationSearch, archived: showArchived }),
+      getConversations({ trashed: true }),
+    ]);
     setConversations(items);
+    setTrashedConversations(trashedItems);
+    const nextTrashedIds = new Set(trashedItems.map((conversation) => conversation.id));
+    const visibleItems = items.filter((item) => !nextTrashedIds.has(item.id));
     setActiveConversationId((current) => {
-      if (preferredId && items.some((item) => item.id === preferredId)) {
+      if (preferredId && visibleItems.some((item) => item.id === preferredId)) {
         return preferredId;
       }
-      if (current && items.some((item) => item.id === current)) {
+      if (current && visibleItems.some((item) => item.id === current)) {
         return current;
       }
-      return items[0]?.id ?? "";
+      return visibleItems[0]?.id ?? "";
     });
+  }
+
+  async function migrateLegacyTrashToServer() {
+    if (hasMigratedLegacyTrashRef.current) {
+      return;
+    }
+    hasMigratedLegacyTrashRef.current = true;
+    const legacyTrash = readLegacyTrashedConversations();
+    if (!legacyTrash.length) {
+      return;
+    }
+    const migrated = await Promise.all(
+      legacyTrash.map(async (conversation) => {
+        try {
+          await trashConversation(conversation.id);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    if (!migrated.some(Boolean)) {
+      return;
+    }
+    clearLegacyTrashedConversations();
+    await reloadConversations();
   }
 
   async function reloadConversationDetail(conversationId: string) {
@@ -287,6 +383,99 @@ function App() {
       await archiveConversation(conversation.id);
     }
     await reloadConversations();
+  }
+
+  function beginRenameConversation(conversation: Conversation) {
+    setRenamingConversationId(conversation.id);
+    setRenameDraft(conversation.title);
+    setOpenConversationMenuId("");
+  }
+
+  async function handleRenameConversation(event: FormEvent<HTMLFormElement>, conversation: Conversation) {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextTitle = renameDraft.trim();
+    if (!nextTitle) {
+      return;
+    }
+    if (nextTitle === conversation.title) {
+      setRenamingConversationId("");
+      return;
+    }
+    try {
+      const updated = await updateConversation(conversation.id, { title: nextTitle });
+      setConversations((current) =>
+        current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+      );
+      setRenamingConversationId("");
+      setRenameDraft("");
+      setOpenConversationMenuId("");
+      setToast("会话已重命名");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rename failed");
+    }
+  }
+
+  async function handleDeleteConversation(conversation: Conversation) {
+    try {
+      await trashConversation(conversation.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Move to trash failed");
+      return;
+    }
+    if (activeConversationId === conversation.id) {
+      const fallback = visibleConversations.find((item) => item.id !== conversation.id);
+      setActiveConversationId(fallback?.id ?? "");
+      setQuotedMessage(null);
+      setQuotedText("");
+      setPendingAttachments([]);
+    }
+    await reloadConversations();
+    setToast(`已移动到${labels.trash}`);
+  }
+
+  async function handleRestoreConversation(conversationId: string) {
+    const restoredConversation = trashedConversations.find((item) => item.id === conversationId);
+    const shouldSelectRestored = Boolean(
+      restoredConversation && (!restoredConversation.is_archived || showArchived),
+    );
+    try {
+      await restoreConversation(conversationId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Restore failed");
+      return;
+    }
+    await reloadConversations(shouldSelectRestored ? restoredConversation?.id : undefined);
+    if (!activeConversationId && restoredConversation && shouldSelectRestored) {
+      setActiveConversationId(restoredConversation.id);
+    }
+    setToast("已恢复到会话列表");
+  }
+
+  async function handlePermanentDeleteConversation() {
+    if (!deleteTargetConversation) {
+      return;
+    }
+    const targetConversation = deleteTargetConversation;
+    setError("");
+    try {
+      await deleteConversation(targetConversation.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+      return;
+    }
+    setTrashedConversations((current) =>
+      current.filter((conversation) => conversation.id !== targetConversation.id),
+    );
+    setDeleteTargetConversation(null);
+    if (activeConversationId === targetConversation.id) {
+      setActiveConversationId("");
+      setMessages([]);
+      setArtifacts([]);
+      setAttachments([]);
+    }
+    await reloadConversations();
+    setToast("已永久删除");
   }
 
   async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -369,11 +558,11 @@ function App() {
     }
   }
 
-  async function handleRegenerate() {
+  async function handleRegenerate(sourceMessage?: ChatMessage) {
     if (!activeConversation || isSending) {
       return;
     }
-    const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
+    const lastUserMessage = sourceMessage ?? [...messages].reverse().find((message) => message.role === "user");
     if (!lastUserMessage) {
       setError(labels.noUserMessage);
       return;
@@ -402,7 +591,13 @@ function App() {
   }
 
   function applyChatResponse(response: ChatResponse) {
-    setMessages((current) => [...current, ...response.messages]);
+    const traceEvents = response.events ?? [];
+    const responseMessages = response.messages.map((message) =>
+      message.role === "agent" && !(message.trace_events?.length)
+        ? { ...message, trace_events: traceEvents }
+        : message,
+    );
+    setMessages((current) => [...current, ...responseMessages]);
     setArtifacts((current) => [...current, ...response.artifacts]);
     setProgressSteps(progressFromEvents(response.events ?? []));
   }
@@ -434,7 +629,7 @@ function App() {
   async function handleCreateAgent(event: FormEvent) {
     event.preventDefault();
     if (!agentDraft.name?.trim()) {
-      setError("Agent name is required");
+      setError("智能体（Agent）名称不能为空");
       return;
     }
     const agent = await createAgent(agentDraft);
@@ -446,12 +641,18 @@ function App() {
       capabilities: ["text"],
       tools: [],
     });
-    setToast("Agent 已创建");
+    setToast("智能体（Agent）已创建");
   }
 
   function openCodeEditor(artifact: Artifact) {
     setEditArtifact(artifact);
     setEditDraft(artifact.content ?? "");
+  }
+
+  function openArtifactPreview(artifact: Artifact) {
+    setPreviewArtifact(artifact);
+    setRightPanelOpen(true);
+    setRightTab("artifacts");
   }
 
   async function handleSaveArtifact() {
@@ -500,39 +701,58 @@ function App() {
     window.addEventListener("mouseup", handleUp);
   }
 
-  function toggleToolPreference(key: keyof ToolPreferences) {
-    setToolPreferences((current) => ({ ...current, [key]: !current[key] }));
+  function resizeComposerInput(target: HTMLTextAreaElement | null = composerTextareaRef.current) {
+    if (!target) {
+      return;
+    }
+    target.style.height = "auto";
+    target.style.height = `${clamp(target.scrollHeight, 76, 220)}px`;
+  }
+
+  function updateMentionState(value: string, cursor: number) {
+    if (activeConversation?.mode !== "group") {
+      setMentionStart(null);
+      setMentionQuery("");
+      return;
+    }
+    const beforeCursor = value.slice(0, cursor);
+    const atIndex = beforeCursor.lastIndexOf("@");
+    if (atIndex < 0 || (atIndex > 0 && !/\s/.test(beforeCursor[atIndex - 1]))) {
+      setMentionStart(null);
+      setMentionQuery("");
+      return;
+    }
+    const query = beforeCursor.slice(atIndex + 1);
+    if (/\s/.test(query) || /[^A-Za-z0-9_]/.test(query)) {
+      setMentionStart(null);
+      setMentionQuery("");
+      return;
+    }
+    setMentionStart(atIndex);
+    setMentionQuery(query);
+  }
+
+  function insertAgentMention(agent: Agent) {
+    if (mentionStart === null) {
+      return;
+    }
+    const textarea = composerTextareaRef.current;
+    const cursor = textarea?.selectionStart ?? input.length;
+    const mention = `@${agent.id} `;
+    const nextInput = `${input.slice(0, mentionStart)}${mention}${input.slice(cursor)}`;
+    const nextCursor = mentionStart + mention.length;
+    setInput(nextInput);
+    setMentionStart(null);
+    setMentionQuery("");
+    window.requestAnimationFrame(() => {
+      composerTextareaRef.current?.focus();
+      composerTextareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+      resizeComposerInput();
+    });
   }
 
   return (
     <main className={`app-shell ${rightPanelOpen ? "with-right-panel" : "right-panel-collapsed"}`} style={shellStyle}>
-      <nav className="rail">
-        <div className="rail-logo">AH</div>
-        {[
-          ["chat", "对话", "●"],
-          ["agents", "Agents", "◎"],
-          ["tools", "Tools", "◇"],
-          ["artifacts", "产物", "▣"],
-          ["settings", "设置", "⚙"],
-        ].map(([id, label, icon]) => (
-          <button
-            className={activeNav === id ? "active" : ""}
-            key={id}
-            title={label}
-            type="button"
-            onClick={() => {
-              setActiveNav(id);
-              if (id === "agents" || id === "tools" || id === "artifacts") {
-                setRightPanelOpen(true);
-                setRightTab(id === "agents" ? "agents" : id === "tools" ? "tools" : "artifacts");
-              }
-            }}
-          >
-            {icon}
-          </button>
-        ))}
-      </nav>
-
       <aside className="conversation-pane">
         <section className="brand">
           <div>
@@ -564,9 +784,10 @@ function App() {
             </div>
             <div className="agent-picker">
               {agents.map((agent) => (
-                <label key={agent.id}>
+                <label className="agent-choice" key={agent.id}>
                   <input checked={draftAgentIds.includes(agent.id)} onChange={() => toggleDraftAgent(agent.id)} type={draftMode === "single" ? "radio" : "checkbox"} />
-                  <span>{agent.name}</span>
+                  <AvatarBadge value={agent.id} className="agent-picker-avatar" />
+                  <span>{agentNameForDisplay(agent)}</span>
                 </label>
               ))}
             </div>
@@ -580,27 +801,91 @@ function App() {
         <input className="search-input" value={conversationSearch} onChange={(event) => setConversationSearch(event.target.value)} placeholder={labels.search} />
 
         <section className="conversation-list">
-          {conversations.map((conversation) => (
-            <article className={`conversation-card ${conversation.id === activeConversationId ? "active" : ""}`} key={conversation.id} onClick={() => setActiveConversationId(conversation.id)}>
-              <div className="conversation-avatar">{conversation.agent_ids[0]?.slice(0, 2).toUpperCase() ?? "AH"}</div>
-              <div className="conversation-content">
-                <div className="conversation-title-row">
-                  <strong>{conversation.title}</strong>
-                  <span>{formatRelativeTime(conversation.updated_at)}</span>
+          {visibleConversations.length ? (
+            visibleConversations.map((conversation) => (
+              <article
+                className={`conversation-card ${conversation.id === activeConversationId ? "active" : ""}`}
+                key={conversation.id}
+                onClick={() => {
+                  setActiveConversationId(conversation.id);
+                  setOpenConversationMenuId("");
+                }}
+              >
+                <div className="conversation-content">
+                  {renamingConversationId === conversation.id ? (
+                    <form
+                      className="conversation-rename-form"
+                      onClick={(event) => event.stopPropagation()}
+                      onSubmit={(event) => handleRenameConversation(event, conversation)}
+                    >
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(event) => setRenameDraft(event.target.value)}
+                      />
+                      <button type="submit">{labels.save}</button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRenamingConversationId("");
+                          setRenameDraft("");
+                        }}
+                      >
+                        {labels.cancel}
+                      </button>
+                    </form>
+                  ) : (
+                    <div className="conversation-title-row">
+                      <strong>{conversation.title}</strong>
+                      {conversation.is_pinned ? <span>{labels.pin}</span> : null}
+                    </div>
+                  )}
                 </div>
-                <small>{conversation.mode} · {conversation.agent_ids.join(", ")}</small>
-                <p>{conversation.last_message || labels.noMessages}</p>
-                <div className="conversation-actions">
-                  <button type="button" onClick={(event) => { event.stopPropagation(); handleConversationPin(conversation); }}>
-                    {conversation.is_pinned ? labels.unpin : labels.pin}
-                  </button>
-                  <button type="button" onClick={(event) => { event.stopPropagation(); handleArchive(conversation); }}>
-                    {conversation.is_archived ? labels.restore : labels.archive}
-                  </button>
-                </div>
-              </div>
-            </article>
-          ))}
+                {renamingConversationId !== conversation.id ? (
+                  <div className={`conversation-actions ${openConversationMenuId === conversation.id ? "menu-open" : ""}`}>
+                    <button
+                      className="conversation-menu-button"
+                      type="button"
+                      aria-label="会话操作"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setOpenConversationMenuId((current) => current === conversation.id ? "" : conversation.id);
+                      }}
+                    >
+                      <span />
+                      <span />
+                      <span />
+                    </button>
+                    {openConversationMenuId === conversation.id ? (
+                      <div className="conversation-menu" onClick={(event) => event.stopPropagation()}>
+                        <button type="button" onClick={() => beginRenameConversation(conversation)}>
+                          {labels.rename}
+                        </button>
+                        <button type="button" onClick={() => { setOpenConversationMenuId(""); handleConversationPin(conversation); }}>
+                          {conversation.is_pinned ? labels.unpin : labels.pin}
+                        </button>
+                        <button type="button" onClick={() => { setOpenConversationMenuId(""); handleArchive(conversation); }}>
+                          {conversation.is_archived ? labels.restore : labels.archive}
+                        </button>
+                        <button className="danger" type="button" onClick={() => { setOpenConversationMenuId(""); handleDeleteConversation(conversation); }}>
+                          {labels.delete}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </article>
+            ))
+          ) : (
+            <div className="conversation-empty">{labels.noConversations}</div>
+          )}
+        </section>
+
+        <section className="conversation-footer">
+          <button className="trash-button" type="button" onClick={() => setIsTrashOpen((current) => !current)}>
+            {labels.trash}
+            <strong>{trashedConversations.length}</strong>
+          </button>
         </section>
       </aside>
       <button
@@ -613,35 +898,16 @@ function App() {
       <section className="chat-panel">
         <header className="chat-header">
           <div>
-            <span>上下文</span>
             <h1>{activeConversation?.title ?? labels.emptyTitle}</h1>
           </div>
           <div className="header-pills">
             <span>{agentMode === "multi" ? labels.multi : labels.single}</span>
-            <span>{selectedAgentIds.length} Agents</span>
+            <span>{selectedAgentIds.length} 智能体（Agents）</span>
             <button type="button" onClick={() => setRightPanelOpen((current) => !current)}>
               {rightPanelOpen ? labels.collapse : labels.expand}
             </button>
           </div>
         </header>
-
-        {openConversationIds.length ? (
-          <section className="conversation-tabs">
-            {openConversationIds.map((id) => {
-              const conversation = conversations.find((item) => item.id === id);
-              return (
-                <button
-                  className={id === activeConversationId ? "active" : ""}
-                  key={id}
-                  type="button"
-                  onClick={() => setActiveConversationId(id)}
-                >
-                  {conversation?.title ?? id}
-                </button>
-              );
-            })}
-          </section>
-        ) : null}
 
         <section className="chat-stream">
           {messages.length === 0 ? (
@@ -662,11 +928,22 @@ function App() {
                   setQuotedMessage(message);
                   setQuotedText(text);
                 }}
+                onRegenerate={() => handleRegenerate(message)}
+                regenerating={isSending}
                 onToast={setToast}
               />
             ))
           )}
-          {progressSteps.length ? <ProgressPanel steps={progressSteps} /> : null}
+          {isSending ? (
+            <LiveThinkingPanel
+              agentIds={selectedAgentIds}
+              agentMode={agentMode}
+              attachmentCount={pendingAttachments.length}
+              modelId={selectedModelId}
+              toolPreferences={toolPreferences}
+            />
+          ) : null}
+          {!isSending && progressSteps.some((step) => step.status === "error") ? <ProgressPanel steps={progressSteps} /> : null}
         </section>
 
         <form className="composer" onSubmit={handleSubmit}>
@@ -686,25 +963,53 @@ function App() {
               ))}
             </div>
           ) : null}
-          <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={labels.placeholder} />
+          <textarea
+            ref={composerTextareaRef}
+            rows={2}
+            value={input}
+            onChange={(event) => {
+              setInput(event.target.value);
+              resizeComposerInput(event.currentTarget);
+              updateMentionState(event.currentTarget.value, event.currentTarget.selectionStart);
+            }}
+            onClick={(event) => updateMentionState(event.currentTarget.value, event.currentTarget.selectionStart)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setMentionStart(null);
+                setMentionQuery("");
+              }
+            }}
+            onKeyUp={(event) => {
+              if (event.key !== "Escape") {
+                updateMentionState(event.currentTarget.value, event.currentTarget.selectionStart);
+              }
+            }}
+            placeholder={labels.placeholder}
+          />
+          {mentionCandidates.length ? (
+            <div className="mention-menu">
+              {mentionCandidates.map((agent) => (
+                <button
+                  key={agent.id}
+                  type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    insertAgentMention(agent);
+                  }}
+                >
+                  <AvatarBadge value={agent.id} className="mention-avatar" />
+                  <span>{agentNameForDisplay(agent)}</span>
+                  <small>@{agent.id}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="composer-footer">
             <div className="composer-left">
               <label className="upload-button">
                 + {labels.upload}
                 <input multiple type="file" onChange={handleFiles} />
               </label>
-              <div className="tool-toggles" aria-label={labels.toolSwitches}>
-                {(Object.keys(toolPreferences) as Array<keyof ToolPreferences>).map((key) => (
-                  <button
-                    className={toolPreferences[key] ? "active" : ""}
-                    key={key}
-                    type="button"
-                    onClick={() => toggleToolPreference(key)}
-                  >
-                    {toolLabel(key)}
-                  </button>
-                ))}
-              </div>
             </div>
             {error ? <span className="error-text">{error}</span> : <span />}
             <div className="composer-actions">
@@ -713,11 +1018,6 @@ function App() {
                   <option key={model.id} value={model.id}>{model.name}</option>
                 ))}
               </select>
-              <select className="model-select" value={agentMode} onChange={(event) => setAgentMode(event.target.value as "single" | "multi")}>
-                <option value="single">{labels.single}</option>
-                <option value="multi">{labels.multi}</option>
-              </select>
-              <button type="button" onClick={handleRegenerate} disabled={!activeConversation || isSending}>{labels.regenerate}</button>
               <button className="send-button" disabled={!activeConversation || isSending || !input.trim()} type="submit">
                 {isSending ? labels.sending : labels.send}
               </button>
@@ -749,29 +1049,20 @@ function App() {
           onApply={handleApplyDiff}
           onCreateAgent={handleCreateAgent}
           onEdit={openCodeEditor}
-          onPreview={setPreviewArtifact}
+          onPreview={openArtifactPreview}
           onRestoreVersion={handleRestoreArtifactVersion}
+          onClosePreview={() => setPreviewArtifact(null)}
           onToast={setToast}
           agentDraft={agentDraft}
           setAgentDraft={setAgentDraft}
           pinnedMessages={pinnedMessages}
+          previewArtifact={previewArtifact}
           selectedAgentIds={selectedAgentIds}
           tab={rightTab}
           tools={tools}
         />
       </aside>
 
-      {previewArtifact ? (
-        <div className="preview-modal" role="dialog" aria-modal="true">
-          <div className="preview-card">
-            <header>
-              <h2>{previewArtifact.title}</h2>
-              <button type="button" onClick={() => setPreviewArtifact(null)}>{labels.close}</button>
-            </header>
-            <iframe title={previewArtifact.title} src={`${API_ORIGIN}${previewArtifact.preview_url}`} />
-          </div>
-        </div>
-      ) : null}
       {editArtifact ? (
         <div className="preview-modal" role="dialog" aria-modal="true">
           <div className="editor-card">
@@ -791,6 +1082,61 @@ function App() {
         </div>
       ) : null}
       {toast ? <div className="toast">{toast}</div> : null}
+
+      <aside className={`trash-drawer ${isTrashOpen ? "open" : ""}`}>
+        <header className="trash-header">
+          <div>
+            <strong>{labels.trash}</strong>
+            <small>{trashedConversations.length}</small>
+          </div>
+          <button type="button" onClick={() => setIsTrashOpen(false)}>{labels.close}</button>
+        </header>
+        <div className="trash-list">
+          {trashedConversations.length ? (
+            trashedConversations.map((conversation) => (
+              <article className="trash-item" key={conversation.id}>
+                <div>
+                  <strong>{conversation.title}</strong>
+                  <small>{conversation.mode} · {displayAgentIds(conversation.agent_ids)}</small>
+                  <p>{conversation.last_message || labels.noMessages}</p>
+                </div>
+                <div className="trash-actions">
+                  <button type="button" onClick={() => handleRestoreConversation(conversation.id)}>
+                    {labels.restore}
+                  </button>
+                  <button type="button" onClick={() => setDeleteTargetConversation(conversation)}>
+                    {labels.delete}
+                  </button>
+                </div>
+              </article>
+            ))
+          ) : (
+            <div className="conversation-empty">{labels.trashEmpty}</div>
+          )}
+        </div>
+      </aside>
+
+      {deleteTargetConversation ? (
+        <div className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-delete-title">
+          <section className="confirm-card">
+            <div>
+              <h2 id="confirm-delete-title">{labels.confirmDeleteTitle}</h2>
+              <p>
+                {labels.confirmDeleteBody}
+                <span>{deleteTargetConversation.title}</span>
+              </p>
+            </div>
+            <footer>
+              <button type="button" onClick={() => setDeleteTargetConversation(null)}>
+                {labels.cancel}
+              </button>
+              <button className="danger" type="button" onClick={handlePermanentDeleteConversation}>
+                {labels.yes}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -802,6 +1148,8 @@ function MessageCard({
   onPin,
   onQuote,
   onQuoteSelected,
+  onRegenerate,
+  regenerating,
   onToast,
 }: {
   attachmentMap: Map<string, Attachment>;
@@ -810,19 +1158,22 @@ function MessageCard({
   onPin: () => void;
   onQuote: () => void;
   onQuoteSelected: (text: string) => void;
+  onRegenerate: () => void;
+  regenerating: boolean;
   onToast: (message: string) => void;
 }) {
   const messageAttachments = (message.attachment_ids ?? [])
     .map((id) => attachmentMap.get(id))
     .filter(Boolean) as Attachment[];
-  const sender = message.role === "user" ? "你" : message.sender ?? "agent";
+  const sender = message.role === "user" ? "user" : message.sender ?? "agent";
+  const displayName = displayNameForSender(sender);
 
   return (
     <article className={`message-card ${message.role}`}>
-      <div className="avatar">{sender.slice(0, 2).toUpperCase()}</div>
+      <AvatarBadge value={sender} className="avatar" />
       <div className="message-bubble">
         <header>
-          <strong>{sender}</strong>
+          <strong>{displayName}</strong>
           <div className="message-actions">
             <button type="button" onClick={onQuote}>{t.quote}</button>
             <button type="button" onClick={() => {
@@ -836,12 +1187,108 @@ function MessageCard({
             <button type="button" onClick={onPin}>{message.is_pinned ? t.unpinMessage : t.pinMessage}</button>
           </div>
         </header>
+        {message.role === "agent" ? (
+          <ThinkingSummary events={message.trace_events ?? []} label={t.thinking} sender={sender} content={message.content} />
+        ) : null}
         {message.quoted_message_id || message.quoted_text ? <small className="quoted-line">{t.quoted}: {message.quoted_text || message.quoted_message_id}</small> : null}
         {message.generation_index && message.generation_index > 1 ? (
           <small className="quoted-line">版本 {message.generation_index}{message.is_active_generation === false ? "（旧版）" : ""}</small>
         ) : null}
         <MarkdownMessage content={message.content} copyLabel={t.copy} copiedLabel={t.copied} onToast={onToast} />
         {messageAttachments.length ? <AttachmentList attachments={messageAttachments} /> : null}
+        {message.role === "user" ? (
+          <div className="message-regenerate-row">
+            <button type="button" onClick={onRegenerate} disabled={regenerating}>
+              {t.regenerate}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function ThinkingSummary({
+  content,
+  events,
+  label,
+  sender,
+}: {
+  content: string;
+  events: TraceEvent[];
+  label: string;
+  sender: string;
+}) {
+  const steps = events.length ? [] : buildThinkingSummary(sender, content);
+  const duration = traceDuration(events);
+  return (
+    <details className="thinking-summary">
+      <summary>{duration ? `已思考（用时 ${duration}）` : label}</summary>
+      {events.length ? (
+        <ol className="thinking-trace">
+          {events.map((event, index) => (
+            <li className={event.status === "error" ? "error" : ""} key={event.id ?? `${event.type}-${index}`}>
+              <span />
+              <div>
+                <strong>{traceEventTitle(event)}</strong>
+                {traceEventDetail(event) ? <p>{traceEventDetail(event)}</p> : null}
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <ol>
+          {steps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
+      )}
+    </details>
+  );
+}
+
+function LiveThinkingPanel({
+  agentIds,
+  agentMode,
+  attachmentCount,
+  modelId,
+  toolPreferences,
+}: {
+  agentIds: string[];
+  agentMode: "single" | "multi";
+  attachmentCount: number;
+  modelId: string;
+  toolPreferences: ToolPreferences;
+}) {
+  const selectedAgents = agentIds.length ? agentIds.map((agentId) => displayAgentName(agentId)).join("、") : "智能体（Agent）";
+  const primaryAgentId = agentIds[0] ?? "orchestrator";
+  const enabledTools = (Object.keys(toolPreferences) as Array<keyof ToolPreferences>)
+    .filter((key) => toolPreferences[key])
+    .map(toolLabel);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    setElapsedSeconds(0);
+    const timer = window.setInterval(() => {
+      setElapsedSeconds((current) => current + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <article className="message-card agent live-thinking-row">
+      <AvatarBadge value={primaryAgentId} className="avatar" />
+      <div className="message-bubble live-thinking-bubble">
+        <header>
+          <strong>思考中（已用时 {elapsedSeconds} 秒）</strong>
+          <small>{agentMode === "multi" ? labels.multi : labels.single}</small>
+        </header>
+        <div className="live-thinking-text" aria-live="polite">
+          正在执行真实流程，等待后端返回 Orchestrator、Agent 和 Tool 事件。
+          本轮将调用 {selectedAgents}；模型策略 {modelId || "Auto"}；附件 {attachmentCount} 个；工具 {enabledTools.length ? enabledTools.join("、") : "无额外工具"}。
+          完成后这里会自动收起，并在正文上方展示真实思考过程。
+          <span className="thinking-cursor" />
+        </div>
       </div>
     </article>
   );
@@ -901,12 +1348,14 @@ function RightPanelContent({
   attachments,
   labels: t,
   onApply,
+  onClosePreview,
   onCreateAgent,
   onEdit,
   onPreview,
   onRestoreVersion,
   onToast,
   pinnedMessages,
+  previewArtifact,
   selectedAgentIds,
   tab,
   tools,
@@ -919,12 +1368,14 @@ function RightPanelContent({
   attachments: Attachment[];
   labels: typeof labels;
   onApply: (artifact: Artifact) => void;
+  onClosePreview: () => void;
   onCreateAgent: (event: FormEvent) => void;
   onEdit: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
   onRestoreVersion: (artifact: Artifact, versionId: string) => void;
   onToast: (message: string) => void;
   pinnedMessages: ChatMessage[];
+  previewArtifact: Artifact | null;
   selectedAgentIds: string[];
   tab: RightPanelTab;
   tools: ToolOption[];
@@ -939,7 +1390,7 @@ function RightPanelContent({
           <input
             value={agentDraft.name ?? ""}
             onChange={(event) => setAgentDraft((current) => ({ ...current, name: event.target.value }))}
-            placeholder="Agent name"
+            placeholder="智能体名称（Agent name）"
           />
           <input
             value={agentDraft.description ?? ""}
@@ -976,11 +1427,16 @@ function RightPanelContent({
           <button type="submit">{t.createAgent}</button>
         </form>
         {selected.map((agent) => (
-          <section className="side-card" key={agent.id}>
-            <strong>{agent.name}</strong>
+          <section className="side-card agent-side-card" key={agent.id}>
+            <div className="agent-side-header">
+              <AvatarBadge value={agent.id} className="agent-avatar" />
+              <div>
+                <strong>{agentNameForDisplay(agent)}</strong>
+                {agent.is_custom ? <small>自定义智能体（Custom Agent）</small> : null}
+              </div>
+            </div>
             <p>{agent.description}</p>
             <TagRow items={agent.capabilities ?? []} />
-            {agent.is_custom ? <small>Custom Agent</small> : null}
             {agent.system_prompt ? <small>Prompt: {agent.system_prompt.slice(0, 120)}</small> : null}
             <small>Model: {agent.model_provider ?? "conversation model"}</small>
             <small>Skills: {(agent.skills ?? []).join(", ") || "none"}</small>
@@ -1026,6 +1482,9 @@ function RightPanelContent({
 
   return (
     <div className="right-content">
+      {previewArtifact ? (
+        <ArtifactPreviewPanel artifact={previewArtifact} labels={t} onClose={onClosePreview} />
+      ) : null}
       {artifacts.length === 0 ? (
         <section className="side-card"><p>{t.noArtifacts}</p></section>
       ) : (
@@ -1065,6 +1524,7 @@ function ArtifactCard({
 }) {
   const [diff, setDiff] = useState<StructuredDiff | null>(null);
   const [versions, setVersions] = useState<ArtifactVersion[]>([]);
+  const showPreviewButton = artifact.type === "code" || Boolean(artifact.preview_url);
 
   async function handleCopy() {
     await navigator.clipboard.writeText(artifact.content ?? artifact.preview_url ?? "");
@@ -1106,7 +1566,11 @@ function ArtifactCard({
           {artifact.preview_url ? <a href={`${API_ORIGIN}${artifact.preview_url}`} target="_blank" rel="noreferrer">{t.preview}</a> : null}
         </div>
       ) : null}
-      {artifact.content ? <pre>{artifact.content}</pre> : null}
+      {artifact.content && artifact.type !== "deployment" && artifact.type !== "document_preview" && artifact.type !== "presentation_preview" ? (
+        <small className="artifact-meta">
+          {artifact.language ?? artifact.type} · {artifact.file_path ?? artifact.id}
+        </small>
+      ) : null}
       {diff ? <DiffViewer diff={diff} /> : null}
       {versions.length ? (
         <div className="version-list">
@@ -1122,7 +1586,7 @@ function ArtifactCard({
         {artifact.type === "code" ? <button type="button" onClick={onEdit}>{t.edit}</button> : null}
         {artifact.content ? <button type="button" onClick={handleToggleVersions}>{t.versions}</button> : null}
         {artifact.type === "diff" ? <button type="button" onClick={handleToggleDiff}>{t.viewDiff}</button> : null}
-        {artifact.preview_url ? <button type="button" onClick={onPreview}>{t.preview}</button> : null}
+        {showPreviewButton ? <button type="button" onClick={onPreview}>{t.preview}</button> : null}
         {artifact.type === "diff" ? (
           <button disabled={artifact.status === "applied"} type="button" onClick={onApply}>
             {artifact.status === "applied" ? t.applied : t.applyDiff}
@@ -1131,6 +1595,86 @@ function ArtifactCard({
       </footer>
     </article>
   );
+}
+
+function ArtifactPreviewPanel({
+  artifact,
+  labels: t,
+  onClose,
+}: {
+  artifact: Artifact;
+  labels: typeof labels;
+  onClose: () => void;
+}) {
+  const inlineHtml = htmlPreviewContent(artifact);
+  const previewUrl = artifact.preview_url ? `${API_ORIGIN}${artifact.preview_url}` : "";
+
+  return (
+    <section className="artifact-preview-panel">
+      <header>
+        <div>
+          <strong>{t.preview}</strong>
+          <small>{artifact.title}</small>
+        </div>
+        <button type="button" onClick={onClose}>{t.close}</button>
+      </header>
+      {inlineHtml ? (
+        <iframe
+          title={`${artifact.title} preview`}
+          sandbox="allow-forms allow-modals allow-scripts"
+          srcDoc={inlineHtml}
+        />
+      ) : previewUrl ? (
+        <iframe title={`${artifact.title} preview`} src={previewUrl} />
+      ) : (
+        <div className="artifact-preview-empty">
+          <strong>暂不支持直接预览</strong>
+          <p>当前产物不是完整 HTML。TSX/JSX 代码需要生成 HTML，或通过 preview_tool 生成预览产物后再查看。</p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function htmlPreviewContent(artifact: Artifact): string {
+  const content = artifact.content?.trim();
+  if (!content) {
+    return "";
+  }
+
+  const metadata = `${artifact.language ?? ""} ${artifact.file_path ?? ""} ${artifact.title ?? ""}`.toLowerCase();
+  const fencedHtml = extractHtmlFence(content);
+  if (fencedHtml) {
+    return fencedHtml;
+  }
+
+  const looksLikeHtml =
+    /<!doctype\s+html/i.test(content) ||
+    /<html[\s>]/i.test(content) ||
+    /<body[\s>]/i.test(content);
+
+  const languageMatches = /(^|\b)(html|htm)(\b|$)/i.test(metadata);
+  if (looksLikeHtml || languageMatches) {
+    return content;
+  }
+
+  return "";
+}
+
+function extractHtmlFence(content: string): string {
+  const fencePattern = /```(?:html)?\n?([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null;
+  while ((match = fencePattern.exec(content)) !== null) {
+    const candidate = match[1].trim();
+    if (
+      /<!doctype\s+html/i.test(candidate) ||
+      /<html[\s>]/i.test(candidate) ||
+      /<body[\s>]/i.test(candidate)
+    ) {
+      return candidate;
+    }
+  }
+  return "";
 }
 
 function MarkdownMessage({
@@ -1254,7 +1798,7 @@ function initialProgressSteps(modelId: string, attachmentCount: number): Progres
     { id: "attachments", label: "准备附件", detail: `${attachmentCount} 个附件`, status: attachmentCount ? "active" : "done" },
     { id: "model", label: "选择模型", detail: modelId, status: "pending" },
     { id: "plan", label: "规划任务", status: "pending" },
-    { id: "agent", label: "调用 Agent", status: "pending" },
+    { id: "agent", label: "调用智能体（Agent）", status: "pending" },
     { id: "complete", label: "汇总结果", status: "pending" },
   ];
 }
@@ -1289,16 +1833,16 @@ function progressFromEvents(events: ChatResponse["events"]): ProgressStep[] {
     if (event.type === "agent.started" || event.type === "agent.parallel_started") {
       steps.push({
         id: `${event.type}-${steps.length}`,
-        label: "调用 Agent",
-        detail: String(event.payload.agent_id ?? ""),
+        label: "调用智能体（Agent）",
+        detail: displayAgentName(String(event.payload.agent_id ?? "")),
         status: "done",
       });
     }
     if (event.type === "agent.completed") {
       steps.push({
         id: `${event.type}-${steps.length}`,
-        label: "Agent 完成",
-        detail: `${event.payload.agent_id ?? ""} · ${event.payload.status ?? ""}`,
+        label: "智能体（Agent）完成",
+        detail: `${displayAgentName(String(event.payload.agent_id ?? ""))} · ${event.payload.status ?? ""}`,
         status: event.payload.status === "failed" ? "error" : "done",
       });
     }
@@ -1413,6 +1957,275 @@ function rightTabLabel(tab: RightPanelTab): string {
     tools: labels.tools,
     context: labels.context,
   }[tab];
+}
+
+function readLegacyTrashedConversations(): Conversation[] {
+  try {
+    const raw = window.localStorage.getItem(TRASH_STORAGE_KEY);
+    return raw ? JSON.parse(raw) as Conversation[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function clearLegacyTrashedConversations() {
+  try {
+    window.localStorage.removeItem(TRASH_STORAGE_KEY);
+  } catch {
+    // The server-side trash state is the source of truth now.
+  }
+}
+
+function AvatarBadge({ value, className = "" }: { value: string; className?: string }) {
+  const profile = avatarProfile(value);
+  return (
+    <span className={`avatar-badge ${profile.tone} ${className}`} aria-hidden="true">
+      <span className="avatar-hair" />
+      <span className="avatar-face">
+        <span className="avatar-eye left" />
+        <span className="avatar-eye right" />
+        <span className="avatar-mouth" />
+      </span>
+      {profile.symbol ? <span className="avatar-symbol">{profile.symbol}</span> : null}
+    </span>
+  );
+}
+
+function agentNameForDisplay(agent: Agent): string {
+  return displayAgentName(agent.id, agent.name);
+}
+
+function displayAgentIds(agentIds: string[]): string {
+  return agentIds.map((agentId) => displayAgentName(agentId)).join(", ");
+}
+
+function displayAgentName(value: string, fallback?: string): string {
+  const name = (fallback ?? value).trim();
+  const normalized = `${value} ${name}`.toLowerCase();
+
+  if (normalized.includes("orchestrator")) {
+    return "协调器（Orchestrator）";
+  }
+  if (normalized.includes("codex")) {
+    return "代码智能体（Codex）";
+  }
+  if (normalized.includes("code_agent") || normalized.includes("code agent")) {
+    return "代码智能体（Code Agent）";
+  }
+  if (normalized.includes("ui_builder") || normalized.includes("ui builder")) {
+    return "界面构建智能体（UI Builder）";
+  }
+  if (normalized.includes("code_reviewer") || normalized.includes("code reviewer")) {
+    return "代码审查智能体（Code Reviewer）";
+  }
+  if (normalized.includes("vision")) {
+    return "视觉智能体（Vision Agent）";
+  }
+  if (normalized.includes("file")) {
+    return "文件分析智能体（File Analyst）";
+  }
+  if (normalized.trim() === "agent") {
+    return "智能体（Agent）";
+  }
+  if (!name) {
+    return "智能体（Agent）";
+  }
+  if (/[（(]/.test(name)) {
+    return name;
+  }
+  return `${name}（Custom Agent）`;
+}
+
+function avatarProfile(value: string): { symbol: string; tone: string } {
+  const normalized = value.toLowerCase();
+  if (normalized === "user" || normalized === "you" || normalized === "你") {
+    return { symbol: "", tone: "avatar-user" };
+  }
+  if (normalized.includes("orchestrator")) {
+    return { symbol: "PL", tone: "avatar-orchestrator" };
+  }
+  if (normalized.includes("codex") || normalized.includes("code_agent")) {
+    return { symbol: "</>", tone: "avatar-code" };
+  }
+  if (normalized.includes("ui_builder") || normalized.includes("ui")) {
+    return { symbol: "UI", tone: "avatar-ui" };
+  }
+  if (normalized.includes("review")) {
+    return { symbol: "OK", tone: "avatar-review" };
+  }
+  if (normalized.includes("vision")) {
+    return { symbol: "VI", tone: "avatar-vision" };
+  }
+  if (normalized.includes("file")) {
+    return { symbol: "FI", tone: "avatar-file" };
+  }
+  return { symbol: normalized.slice(0, 2).toUpperCase() || "AG", tone: "avatar-custom" };
+}
+
+function displayNameForSender(sender: string): string {
+  const normalized = sender.toLowerCase();
+  if (normalized === "user" || normalized === "you" || normalized === "你") {
+    return "你";
+  }
+  return displayAgentName(sender);
+}
+
+function traceDuration(events: TraceEvent[]): string {
+  const durationMs = Math.max(
+    0,
+    ...events.map((event) => Number(event.duration_ms ?? 0)).filter((value) => Number.isFinite(value)),
+  );
+  if (!durationMs) {
+    return "";
+  }
+  const seconds = Math.max(1, Math.round(durationMs / 1000));
+  return `${seconds} 秒`;
+}
+
+function traceEventTitle(event: TraceEvent): string {
+  const payload = event.payload ?? {};
+  switch (event.type) {
+    case "message.received":
+      return "收到用户消息";
+    case "context.loaded":
+      return "读取会话上下文";
+    case "model.selected":
+      return "选择模型";
+    case "attachments.prepared":
+      return "准备附件";
+    case "run.started":
+      return "启动协调器（Orchestrator）";
+    case "run.planned":
+      return "完成任务拆解";
+    case "agent.started":
+    case "agent.parallel_started":
+      return `调用 ${displayAgentName(String(payload.agent_id ?? event.agent_id ?? ""))}`;
+    case "agent.completed":
+      return `${displayAgentName(String(payload.agent_id ?? event.agent_id ?? ""))} 完成`;
+    case "agent.skipped":
+      return `跳过 ${displayAgentName(String(payload.agent_id ?? event.agent_id ?? ""))}`;
+    case "tool.started":
+      return `调用 ${displayToolName(String(payload.tool_id ?? ""))}`;
+    case "tool.completed":
+      return `${displayToolName(String(payload.tool_id ?? ""))} 完成`;
+    case "tool.failed":
+      return `${displayToolName(String(payload.tool_id ?? ""))} 失败`;
+    case "run.completed":
+      return "汇总执行结果";
+    default:
+      return event.title ?? event.type;
+  }
+}
+
+function traceEventDetail(event: TraceEvent): string {
+  const payload = event.payload ?? {};
+  if (event.type === "context.loaded") {
+    return [
+      `${Number(payload.history_count ?? 0)} 条历史`,
+      `${Number(payload.pinned_count ?? 0)} 条长期上下文`,
+      `模式 ${String(payload.mode ?? "")}`,
+      `Agent ${displayAgentIds(toStringList(payload.selected_agents)) || "auto"}`,
+    ].join("，");
+  }
+  if (event.type === "agent.started" || event.type === "agent.parallel_started") {
+    const tools = toStringList(payload.tools).map(displayToolName);
+    const task = String(payload.task ?? "");
+    return tools.length ? `${task}；工具 ${tools.join("、")}` : task;
+  }
+  if (event.type === "agent.completed") {
+    const status = String(payload.status ?? "");
+    const artifactCount = Number(payload.artifact_count ?? 0);
+    const error = payload.error ? `，错误：${String(payload.error)}` : "";
+    return `状态 ${status || "done"}，产物 ${artifactCount} 个${error}`;
+  }
+  if (event.type === "tool.started") {
+    const keys = toStringList(payload.argument_keys);
+    return `参数：${keys.length ? keys.join("、") : "none"}`;
+  }
+  if (event.type === "tool.completed") {
+    return `生成 ${String(payload.artifact_type ?? "")}：${String(payload.artifact_title ?? "")}`;
+  }
+  if (event.type === "tool.failed") {
+    return String(payload.error ?? "");
+  }
+  if (event.type === "run.planned") {
+    const steps = Array.isArray(payload.steps) ? payload.steps.length : 0;
+    return `${steps} 个步骤：${String(payload.reason ?? "")}`;
+  }
+  if (event.type === "run.completed") {
+    return [
+      `状态 ${String(payload.status ?? "")}`,
+      `Agent ${Number(payload.agent_count ?? 0)} 个`,
+      `产物 ${Number(payload.artifact_count ?? 0)} 个`,
+      `冲突 ${Number(payload.conflict_count ?? 0)} 个`,
+    ].join("，");
+  }
+  return event.detail ?? "";
+}
+
+function toStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function displayToolName(toolId: string): string {
+  const normalized = toolId.toLowerCase();
+  const names: Record<string, string> = {
+    ui_builder_tool: "界面构建工具（ui_builder_tool）",
+    code_review_tool: "代码审查工具（code_review_tool）",
+    preview_tool: "预览工具（preview_tool）",
+    deploy_tool: "部署工具（deploy_tool）",
+    document_preview_tool: "文档预览工具（document_preview_tool）",
+    file_reader_tool: "文件读取工具（file_reader_tool）",
+    image_reader_tool: "图片读取工具（image_reader_tool）",
+  };
+  return names[normalized] ?? (toolId ? `${toolId}（Tool）` : "工具（Tool）");
+}
+
+function buildThinkingSummary(sender: string, content: string): string[] {
+  const normalized = sender.toLowerCase();
+  const summaryHint = buildThinkingSummaryHint(content);
+  const steps = [
+    "读取当前会话上下文",
+    "判断当前问题需要的智能体（Agent）与工具",
+    summaryHint,
+  ];
+  if (normalized.includes("orchestrator")) {
+    steps.splice(1, 2, "拆分任务并安排执行顺序", "协调可用智能体（Agent）与工具返回结果");
+  } else if (normalized.includes("ui_builder")) {
+    steps.splice(1, 2, "提炼页面结构、布局和状态", "生成可继续预览或审查的前端产物");
+  } else if (normalized.includes("review")) {
+    steps.splice(1, 2, "检查代码风险、可维护性和遗漏点", "按优先级整理审查建议");
+  } else if (normalized.includes("codex") || normalized.includes("code_agent")) {
+    steps.splice(1, 2, "定位代码任务和约束", "组织实现方案并输出代码片段");
+  } else if (normalized.includes("vision")) {
+    steps.splice(1, 2, "读取图片或截图的视觉线索", "转成可执行的界面与内容建议");
+  } else if (normalized.includes("file")) {
+    steps.splice(1, 2, "读取附件内容和结构", "提取需求、约束和可执行信息");
+  }
+  if (/fallback|failed|失败|error/i.test(content)) {
+    return [...steps, "检测到异常时保留回退结果"];
+  }
+  return steps;
+}
+
+function buildThinkingSummaryHint(content: string): string {
+  const text = content.toLowerCase();
+  if (/<!doctype\s+html|<html[\s>]|<body[\s>]/i.test(content)) {
+    return "识别到 HTML 产物，保留结构以便预览和复用";
+  }
+  if (/```[\s\S]*?```/.test(content)) {
+    return "识别到代码块，整理为可复制的输出内容";
+  }
+  if (/\btsx\b|\bjsx\b|\breact\b/i.test(text)) {
+    return "识别到前端代码意图，优先保持组件结构和可视层";
+  }
+  if (/\bpython\b|\bfastapi\b|\bapi\b/i.test(text)) {
+    return "识别到后端或接口意图，优先整理为可执行逻辑";
+  }
+  if (content.length > 220) {
+    return "内容较长，先压缩关键结论，再输出正文";
+  }
+  return "整理关键结论后输出到对话框正文";
 }
 
 export default App;

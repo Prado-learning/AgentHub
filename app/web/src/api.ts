@@ -122,6 +122,7 @@ export async function getTools(): Promise<ToolOption[]> {
 export async function getConversations(options?: {
   search?: string;
   archived?: boolean;
+  trashed?: boolean;
 }): Promise<Conversation[]> {
   const params = new URLSearchParams();
   if (options?.search) {
@@ -129,6 +130,9 @@ export async function getConversations(options?: {
   }
   if (options?.archived) {
     params.set("archived", "true");
+  }
+  if (options?.trashed) {
+    params.set("trashed", "true");
   }
   const query = params.toString();
   const data = await request<{ conversations: Conversation[] }>(
@@ -189,6 +193,30 @@ export async function unarchiveConversation(conversationId: string): Promise<Con
   const data = await request<{ conversation: Conversation }>(
     `/conversations/${conversationId}/unarchive`,
     { method: "PATCH" },
+  );
+  return data.conversation;
+}
+
+export async function trashConversation(conversationId: string): Promise<Conversation> {
+  const data = await request<{ conversation: Conversation }>(
+    `/conversations/${conversationId}/trash`,
+    { method: "PATCH" },
+  );
+  return data.conversation;
+}
+
+export async function restoreConversation(conversationId: string): Promise<Conversation> {
+  const data = await request<{ conversation: Conversation }>(
+    `/conversations/${conversationId}/restore`,
+    { method: "PATCH" },
+  );
+  return data.conversation;
+}
+
+export async function deleteConversation(conversationId: string): Promise<Conversation> {
+  const data = await request<{ conversation: Conversation }>(
+    `/conversations/${conversationId}`,
+    { method: "DELETE" },
   );
   return data.conversation;
 }
@@ -307,4 +335,3 @@ export async function restoreArtifactVersion(
 export async function getArtifactDiff(artifactId: string): Promise<StructuredDiff> {
   return request<StructuredDiff>(`/artifacts/${artifactId}/diff`);
 }
-

@@ -3,6 +3,7 @@
 from agenthub.adapters.base import AgentResult, AgentTask
 from agenthub.domain.run import RunContext
 from agenthub.adapters.openai_chat.client import OpenAICompatibleProvider
+from agenthub.runtime.prompt_builder import format_messages_for_prompt
 
 
 class OpenAIChatAdapter:
@@ -75,10 +76,7 @@ class OpenAIChatAdapter:
         return []
 
     def _build_prompt(self, task: AgentTask, context: RunContext) -> str:
-        history = "\n".join(
-            f"{item.get('sender') or item.get('role')}: {item.get('content')}"
-            for item in context.history[-6:]
-        )
+        history = format_messages_for_prompt(context.history, limit=6)
         return (
             f"You are {self.name}.\n"
             f"Conversation mode: {context.mode}\n"
@@ -96,11 +94,12 @@ class OpenAIChatAdapter:
         return "\n\n".join(self.skills)
 
     def _format_pinned_context(self, context: RunContext) -> str:
-        if not context.pinned_context:
-            return "No pinned context."
-        return "\n".join(
-            f"- {item.get('sender') or item.get('role')}: {item.get('content')}"
-            for item in context.pinned_context
+        return format_messages_for_prompt(
+            context.pinned_context,
+            limit=8,
+            item_limit=700,
+            total_limit=2400,
+            empty="No pinned context.",
         )
 
     def _format_summary(self, context: RunContext) -> str:
@@ -119,4 +118,3 @@ class OpenAIChatAdapter:
                 f"- {attachment.get('filename')} ({attachment.get('mime_type')}):\n{preview}"
             )
         return "\n\n".join(sections)
-

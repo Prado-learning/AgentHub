@@ -34,6 +34,7 @@ export type Conversation = {
   agent_ids: string[];
   is_pinned: boolean;
   is_archived: boolean;
+  is_trashed?: boolean;
   created_at: string;
   updated_at: string;
   last_message: string;
@@ -57,6 +58,7 @@ export type ChatMessage = {
   replaces_message_ids?: string[];
   is_active_generation?: boolean;
   is_pinned?: boolean;
+  trace_events?: TraceEvent[];
   created_at?: string;
 };
 
@@ -137,11 +139,21 @@ export type ChatResponse = {
   status: string;
   messages: ChatMessage[];
   artifacts: Artifact[];
-  events?: Array<{
-    type: string;
-    payload: Record<string, unknown>;
-    created_at: string;
-  }>;
+  events?: TraceEvent[];
+};
+
+export type TraceEvent = {
+  id?: string;
+  run_id?: string;
+  type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+  title?: string;
+  detail?: string;
+  status?: "pending" | "running" | "done" | "error";
+  agent_id?: string | null;
+  duration_ms?: number | null;
+  metadata?: Record<string, unknown>;
 };
 
 export type ToolPreferences = {
@@ -174,4 +186,3 @@ export type AgentCreateInput = {
   model_name?: string;
   avatar?: string;
 };
-

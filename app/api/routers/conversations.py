@@ -5,12 +5,14 @@ from pydantic import BaseModel, Field
 
 from app.api.services.conversation_service import (
     create_conversation,
+    delete_conversation,
     get_conversation,
     list_conversations,
     list_messages,
     list_pinned_messages,
     set_conversation_archived,
     set_conversation_pinned,
+    set_conversation_trashed,
     set_message_pinned,
     update_conversation,
 )
@@ -35,8 +37,15 @@ class ConversationUpdateRequest(BaseModel):
 def read_conversations(
     search: str = "",
     archived: bool = Query(False),
+    trashed: bool = Query(False),
 ) -> dict[str, list[dict]]:
-    return {"conversations": list_conversations(search=search, archived=archived)}
+    return {
+        "conversations": list_conversations(
+            search=search,
+            archived=archived,
+            trashed=trashed,
+        )
+    }
 
 
 @router.post("/conversations")
@@ -96,6 +105,30 @@ def unarchive_conversation(conversation_id: str) -> dict:
     return {"conversation": conversation}
 
 
+@router.patch("/conversations/{conversation_id}/trash")
+def trash_conversation(conversation_id: str) -> dict:
+    conversation = set_conversation_trashed(conversation_id, True)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"conversation": conversation}
+
+
+@router.patch("/conversations/{conversation_id}/restore")
+def restore_conversation(conversation_id: str) -> dict:
+    conversation = set_conversation_trashed(conversation_id, False)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"conversation": conversation}
+
+
+@router.delete("/conversations/{conversation_id}")
+def remove_conversation(conversation_id: str) -> dict:
+    conversation = delete_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"conversation": conversation}
+
+
 @router.get("/conversations/{conversation_id}/messages")
 def read_conversation_messages(conversation_id: str) -> dict[str, list[dict]]:
     if get_conversation(conversation_id) is None:
@@ -124,4 +157,3 @@ def unpin_message(conversation_id: str, message_id: str) -> dict:
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
     return {"message": message}
-

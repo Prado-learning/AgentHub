@@ -37,6 +37,7 @@ class HarnessRunner:
     events: list[RunEvent] = field(default_factory=list)
 
     def run(self, context: RunContext) -> RunResult:
+        self.events = []
         run_events = [self._record_event("run.started", {"conversation_id": context.conversation_id})]
         orchestrator = Orchestrator(
             available_agent_ids=list(self.adapters),
@@ -157,7 +158,7 @@ class HarnessRunner:
             conversation_id=context.conversation_id,
             messages=messages,
             artifacts=artifacts,
-            events=run_events,
+            events=self.events,
         )
 
     def _execute_step(
@@ -245,9 +246,38 @@ class HarnessRunner:
     ) -> list[dict]:
         tool_artifacts: list[dict] = []
         for tool_id in tool_ids:
-            result = self.tool_executor.execute(
-                tool_id,
-                **tool_kwargs_for(tool_id, artifacts, step, context),
+            kwargs = tool_kwargs_for(tool_id, artifacts, step, context)
+            self._record_event(
+                "tool.started",
+                {
+                    "step_id": step.id,
+                    "agent_id": step.agent_id,
+                    "tool_id": tool_id,
+                    "argument_keys": sorted(kwargs),
+                },
+            )
+            try:
+                result = self.tool_executor.execute(tool_id, **kwargs)
+            except Exception as exc:
+                self._record_event(
+                    "tool.failed",
+                    {
+                        "step_id": step.id,
+                        "agent_id": step.agent_id,
+                        "tool_id": tool_id,
+                        "error": str(exc),
+                    },
+                )
+                raise
+            self._record_event(
+                "tool.completed",
+                {
+                    "step_id": step.id,
+                    "agent_id": step.agent_id,
+                    "tool_id": tool_id,
+                    "artifact_type": result.type,
+                    "artifact_title": result.title,
+                },
             )
             tool_artifacts.append(self._stamp_artifact(self._tool_result_to_artifact(result), step))
         return tool_artifacts
@@ -340,4 +370,3 @@ class HarnessRunner:
         if "success" in statuses:
             return "partial_success"
         return "failed"
-
