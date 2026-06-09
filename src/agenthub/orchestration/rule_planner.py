@@ -11,6 +11,10 @@ from agenthub.infrastructure.config.env import env_flag, load_env_file
 from agenthub.adapters.openai_chat.client import OpenAICompatibleProvider
 from agenthub.runtime.prompt_builder import format_messages_for_prompt
 from agenthub.tools.executor import build_default_tool_registry
+from agenthub.application.agents.runtime_profile import (
+    AgentRuntimeProfile,
+    load_agent_runtime_profiles,
+)
 
 
 class Orchestrator:
@@ -25,8 +29,10 @@ class Orchestrator:
         available_agent_ids: list[str] | None = None,
         available_tool_ids: list[str] | None = None,
         planner_provider: Any | None = None,
+        agent_profiles: dict[str, AgentRuntimeProfile] | None = None,
     ) -> None:
-        self.available_agent_ids = available_agent_ids or [
+        self.agent_profiles = agent_profiles or load_agent_runtime_profiles()
+        self.available_agent_ids = available_agent_ids or list(self.agent_profiles) or [
             "orchestrator",
             "codex",
             "ui_builder",
@@ -59,7 +65,7 @@ class Orchestrator:
         return Plan(steps=self._build_auto_steps(context), reason="rule based auto dispatch")
 
     def _plan_explicit_mentions(self, message: str, mentions: dict[str, list[str]]) -> Plan:
-        agents = mentions["agents"] or ["orchestrator"]
+        agents = mentions["agents"] or self._agents_for_tools(mentions["tools"]) or ["orchestrator"]
         steps = [
             self._build_step(
                 f"step_{index}",
@@ -70,6 +76,21 @@ class Orchestrator:
             for index, agent_id in enumerate(agents, start=1)
         ]
         return Plan(steps=steps, reason="explicit @mention")
+
+    def _agents_for_tools(self, tool_ids: list[str]) -> list[str]:
+        owners: list[str] = []
+        for tool_id in tool_ids:
+            owner = next(
+                (
+                    agent_id
+                    for agent_id, profile in self.agent_profiles.items()
+                    if tool_id in profile.tools and agent_id in self.available_agent_ids
+                ),
+                None,
+            )
+            if owner and owner not in owners:
+                owners.append(owner)
+        return owners
 
     def _build_auto_steps(self, context: RunContext) -> list[PlanStep]:
         message = context.message
@@ -377,12 +398,8 @@ class Orchestrator:
         return f"{prefix}: {message}" if prefix else message
 
     def _tools_for(self, agent_id: str) -> list[str]:
-        return {
-            "ui_builder": ["preview_tool"],
-            "code_reviewer": ["code_review_tool"],
-            "vision_agent": ["image_reader_tool"],
-            "file_analyst": ["file_reader_tool"],
-        }.get(agent_id, [])
+        profile = self.agent_profiles.get(agent_id)
+        return list(profile.tools) if profile else []
 
     def _contains_any(self, text: str, keywords: list[str]) -> bool:
         return any(keyword in text for keyword in keywords)

@@ -16,6 +16,11 @@ from app.api.services.conversation_service import (
     set_message_pinned,
     update_conversation,
 )
+from app.api.services.memory_service import (
+    delete_memory,
+    extract_memories_with_llm,
+    list_memories,
+)
 
 
 router = APIRouter(tags=["conversations"])
@@ -31,6 +36,11 @@ class ConversationUpdateRequest(BaseModel):
     title: str | None = None
     mode: Literal["single", "group"] | None = None
     agent_ids: list[str] | None = None
+
+
+class MemoryExtractRequest(BaseModel):
+    model_provider: str | None = None
+    model_name: str | None = None
 
 
 @router.get("/conversations")
@@ -157,3 +167,41 @@ def unpin_message(conversation_id: str, message_id: str) -> dict:
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
     return {"message": message}
+
+
+@router.get("/conversations/{conversation_id}/memories")
+def read_memories(conversation_id: str) -> dict[str, list[dict]]:
+    if get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"memories": list_memories(conversation_id)}
+
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/extract-memory")
+def extract_message_memory(
+    conversation_id: str,
+    message_id: str,
+    request: MemoryExtractRequest,
+) -> dict[str, list[dict]]:
+    messages = list_messages(conversation_id)
+    message = next((item for item in messages if item.get("id") == message_id), None)
+    if message is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    try:
+        memories = extract_memories_with_llm(
+            conversation_id,
+            message,
+            messages,
+            model_provider=request.model_provider,
+            model_name=request.model_name,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"memories": memories}
+
+
+@router.delete("/conversations/{conversation_id}/memories/{memory_id}")
+def remove_memory(conversation_id: str, memory_id: str) -> dict:
+    memory = delete_memory(conversation_id, memory_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"memory": memory}

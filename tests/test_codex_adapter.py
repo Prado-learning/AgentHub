@@ -38,3 +38,15 @@ def test_factory_builds_codex_adapter_from_config() -> None:
 
     assert isinstance(adapters["codex"], CodexAdapter)
 
+
+def test_codex_adapter_respects_explicit_model(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_MODEL", "step-3.7-flash")
+
+    adapter = CodexAdapter(
+        model="doubao-seed-2-0-pro-260215",
+        api_key="dummy",
+        base_url="https://example.com/v1",
+    )
+
+    assert adapter.provider.model == "doubao-seed-2-0-pro-260215"
+

@@ -103,6 +103,7 @@ export type Artifact = {
   source_attachment_id?: string;
   mime_type?: string;
   filename?: string;
+  producer_agent_id?: string;
 };
 
 export type ArtifactVersion = {
@@ -140,6 +141,19 @@ export type ChatResponse = {
   messages: ChatMessage[];
   artifacts: Artifact[];
   events?: TraceEvent[];
+  created_agent?: Agent | null;
+};
+
+export type ConversationMemory = {
+  id: string;
+  conversation_id: string;
+  source_message_id?: string;
+  content: string;
+  category: "preference" | "constraint" | "decision" | "goal" | "open_task";
+  confidence: number;
+  created_by: "llm";
+  model_provider?: string;
+  created_at: string;
 };
 
 export type TraceEvent = {

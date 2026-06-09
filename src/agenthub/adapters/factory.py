@@ -91,11 +91,7 @@ def build_agent_adapters_from_env(
     normalized_configs = [
         {
             **config,
-            "adapter": (
-                config.get("adapter", default_adapter)
-                if config.get("adapter") == "codex"
-                else default_adapter
-            ),
+            "adapter": config.get("adapter", default_adapter) if use_real_llm else "mock",
         }
         for config in configs
     ]

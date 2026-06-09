@@ -6,12 +6,15 @@ import {
   createAgent,
   createConversation,
   deleteConversation,
+  deleteConversationMemory,
+  extractMessageMemory,
   getArtifactDiff,
   getArtifactVersions,
   getAgents,
   getConversationArtifacts,
   getConversationAttachments,
   getConversationMessages,
+  getConversationMemories,
   getConversations,
   getModels,
   getTools,
@@ -39,6 +42,7 @@ import type {
   ChatResponse,
   Conversation,
   ConversationMode,
+  ConversationMemory,
   ModelOption,
   StructuredDiff,
   TraceEvent,
@@ -62,6 +66,36 @@ type ProgressStep = {
   label: string;
   detail?: string;
   status: "pending" | "active" | "done" | "error";
+};
+type ConversationDetailState = {
+  messages: ChatMessage[];
+  artifacts: Artifact[];
+  attachments: Attachment[];
+  memories: ConversationMemory[];
+};
+type ConversationRuntimeState = {
+  input: string;
+  isSending: boolean;
+  progressSteps: ProgressStep[];
+  pendingAttachments: Attachment[];
+  quotedMessage: ChatMessage | null;
+  quotedText: string;
+  thinkingStartedAt: number | null;
+};
+const emptyConversationDetail: ConversationDetailState = {
+  messages: [],
+  artifacts: [],
+  attachments: [],
+  memories: [],
+};
+const emptyConversationRuntime: ConversationRuntimeState = {
+  input: "",
+  isSending: false,
+  progressSteps: [],
+  pendingAttachments: [],
+  quotedMessage: null,
+  quotedText: "",
+  thinkingStartedAt: null,
 };
 
 const labels = {
@@ -146,18 +180,15 @@ function App() {
   const [toolPreferences, setToolPreferences] = useState<ToolPreferences>(defaultToolPreferences);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [openConversationIds, setOpenConversationIds] = useState<string[]>([]);
+  const [detailsByConversation, setDetailsByConversation] = useState<Record<string, ConversationDetailState>>({});
+  const [runtimeByConversation, setRuntimeByConversation] = useState<Record<string, ConversationRuntimeState>>({});
   const [conversationSearch, setConversationSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftMode, setDraftMode] = useState<ConversationMode>("single");
   const [draftAgentIds, setDraftAgentIds] = useState<string[]>(["orchestrator"]);
-  const [quotedMessage, setQuotedMessage] = useState<ChatMessage | null>(null);
-  const [quotedText, setQuotedText] = useState("");
   const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
   const [editArtifact, setEditArtifact] = useState<Artifact | null>(null);
   const [editDraft, setEditDraft] = useState("");
@@ -168,11 +199,8 @@ function App() {
     capabilities: ["text"],
     tools: [],
   });
-  const [input, setInput] = useState("请你说一下这个图片给与一种什么感觉");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
-  const [isSending, setIsSending] = useState(false);
-  const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightTab, setRightTab] = useState<RightPanelTab>("artifacts");
   const [conversationWidth, setConversationWidth] = useState(280);
@@ -189,6 +217,17 @@ function App() {
   const hasMigratedLegacyTrashRef = useRef(false);
 
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
+  const activeDetail = detailsByConversation[activeConversationId] ?? emptyConversationDetail;
+  const activeRuntime = runtimeByConversation[activeConversationId] ?? emptyConversationRuntime;
+  const messages = activeDetail.messages;
+  const artifacts = activeDetail.artifacts;
+  const attachments = activeDetail.attachments;
+  const input = activeRuntime.input;
+  const isSending = activeRuntime.isSending;
+  const progressSteps = activeRuntime.progressSteps;
+  const pendingAttachments = activeRuntime.pendingAttachments;
+  const quotedMessage = activeRuntime.quotedMessage;
+  const quotedText = activeRuntime.quotedText;
   const selectedAgentIds = activeConversation?.agent_ids.length
     ? activeConversation.agent_ids
     : draftAgentIds;
@@ -204,6 +243,7 @@ function App() {
     () => new Map(attachments.map((attachment) => [attachment.id, attachment])),
     [attachments],
   );
+  const visibleArtifacts = useMemo(() => latestVisibleArtifacts(artifacts), [artifacts]);
   const mentionAgents = useMemo(() => {
     if (activeConversation?.mode !== "group") {
       return [];
@@ -229,6 +269,108 @@ function App() {
     "--conversation-width": `${conversationWidth}px`,
     "--right-panel-width": rightPanelOpen ? `${rightPanelWidth}px` : "0px",
   } as CSSProperties;
+  const runningConversationCount = Object.values(runtimeByConversation).filter((runtime) => runtime.isSending).length;
+  const visibleRightTabs: RightPanelTab[] = ["artifacts", "agents", "context"];
+
+  function updateConversationDetail(
+    conversationId: string,
+    update: Partial<ConversationDetailState> | ((current: ConversationDetailState) => ConversationDetailState),
+  ) {
+    if (!conversationId) {
+      return;
+    }
+    setDetailsByConversation((current) => {
+      const detail = current[conversationId] ?? emptyConversationDetail;
+      const next = typeof update === "function" ? update(detail) : { ...detail, ...update };
+      return { ...current, [conversationId]: next };
+    });
+  }
+
+  function updateConversationRuntime(
+    conversationId: string,
+    update: Partial<ConversationRuntimeState> | ((current: ConversationRuntimeState) => ConversationRuntimeState),
+  ) {
+    if (!conversationId) {
+      return;
+    }
+    setRuntimeByConversation((current) => {
+      const runtime = current[conversationId] ?? emptyConversationRuntime;
+      const next = typeof update === "function" ? update(runtime) : { ...runtime, ...update };
+      return { ...current, [conversationId]: next };
+    });
+  }
+
+  function openConversation(conversationId: string) {
+    setOpenConversationIds((current) => current.includes(conversationId) ? current : [...current, conversationId]);
+    setActiveConversationId(conversationId);
+    setOpenConversationMenuId("");
+  }
+
+  function closeConversationTab(conversationId: string) {
+    setOpenConversationIds((current) => {
+      const next = current.filter((id) => id !== conversationId);
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(next[next.length - 1] ?? "");
+      }
+      return next;
+    });
+  }
+
+  function setInput(value: SetStateAction<string>) {
+    updateConversationRuntime(activeConversationId, (current) => ({
+      ...current,
+      input: typeof value === "function" ? value(current.input) : value,
+    }));
+  }
+
+  function setMessages(value: SetStateAction<ChatMessage[]>) {
+    updateConversationDetail(activeConversationId, (current) => ({
+      ...current,
+      messages: typeof value === "function" ? value(current.messages) : value,
+    }));
+  }
+
+  function setArtifacts(value: SetStateAction<Artifact[]>) {
+    updateConversationDetail(activeConversationId, (current) => ({
+      ...current,
+      artifacts: typeof value === "function" ? value(current.artifacts) : value,
+    }));
+  }
+
+  function setAttachments(value: SetStateAction<Attachment[]>) {
+    updateConversationDetail(activeConversationId, (current) => ({
+      ...current,
+      attachments: typeof value === "function" ? value(current.attachments) : value,
+    }));
+  }
+
+  function setPendingAttachments(value: SetStateAction<Attachment[]>) {
+    updateConversationRuntime(activeConversationId, (current) => ({
+      ...current,
+      pendingAttachments: typeof value === "function" ? value(current.pendingAttachments) : value,
+    }));
+  }
+
+  function setQuotedMessage(value: SetStateAction<ChatMessage | null>) {
+    updateConversationRuntime(activeConversationId, (current) => ({
+      ...current,
+      quotedMessage: typeof value === "function" ? value(current.quotedMessage) : value,
+    }));
+  }
+
+  function setQuotedText(value: SetStateAction<string>) {
+    updateConversationRuntime(activeConversationId, (current) => ({
+      ...current,
+      quotedText: typeof value === "function" ? value(current.quotedText) : value,
+    }));
+  }
+
+  function setProgressSteps(value: SetStateAction<ProgressStep[]>) {
+    updateConversationRuntime(activeConversationId, (current) => ({
+      ...current,
+      progressSteps: typeof value === "function" ? value(current.progressSteps) : value,
+    }));
+  }
 
   useEffect(() => {
     getAgents().then(setAgents).catch((err: Error) => setError(err.message));
@@ -267,9 +409,6 @@ function App() {
 
   useEffect(() => {
     if (!activeConversationId) {
-      setMessages([]);
-      setArtifacts([]);
-      setAttachments([]);
       return;
     }
     reloadConversationDetail(activeConversationId);
@@ -286,12 +425,17 @@ function App() {
     const visibleItems = items.filter((item) => !nextTrashedIds.has(item.id));
     setActiveConversationId((current) => {
       if (preferredId && visibleItems.some((item) => item.id === preferredId)) {
+        setOpenConversationIds((open) => open.includes(preferredId) ? open : [...open, preferredId]);
         return preferredId;
       }
       if (current && visibleItems.some((item) => item.id === current)) {
         return current;
       }
-      return visibleItems[0]?.id ?? "";
+      const nextId = visibleItems[0]?.id ?? "";
+      if (nextId) {
+        setOpenConversationIds((open) => open.includes(nextId) ? open : [...open, nextId]);
+      }
+      return nextId;
     });
   }
 
@@ -322,14 +466,18 @@ function App() {
   }
 
   async function reloadConversationDetail(conversationId: string) {
-    const [nextMessages, nextArtifacts, nextAttachments] = await Promise.all([
+    const [nextMessages, nextArtifacts, nextAttachments, nextMemories] = await Promise.all([
       getConversationMessages(conversationId),
       getConversationArtifacts(conversationId),
       getConversationAttachments(conversationId),
+      getConversationMemories(conversationId),
     ]);
-    setMessages(nextMessages);
-    setArtifacts(nextArtifacts);
-    setAttachments(nextAttachments);
+    updateConversationDetail(conversationId, {
+      messages: nextMessages,
+      artifacts: nextArtifacts,
+      attachments: nextAttachments,
+      memories: nextMemories,
+    });
   }
 
   function openCreatePanel() {
@@ -482,6 +630,7 @@ function App() {
     if (!activeConversation || !event.target.files?.length) {
       return;
     }
+    const conversationId = activeConversation.id;
     setError("");
     try {
       const uploaded = await Promise.all(
@@ -490,15 +639,21 @@ function App() {
             ? await compressImageFile(file)
             : file;
           const contentBase64 = await fileToBase64(preparedFile);
-          return uploadAttachment(activeConversation.id, {
+          return uploadAttachment(conversationId, {
             filename: preparedFile.name,
             mime_type: preparedFile.type || undefined,
             content_base64: contentBase64,
           });
         }),
       );
-      setAttachments((current) => [...current, ...uploaded]);
-      setPendingAttachments((current) => [...current, ...uploaded]);
+      updateConversationDetail(conversationId, (current) => ({
+        ...current,
+        attachments: [...current.attachments, ...uploaded],
+      }));
+      updateConversationRuntime(conversationId, (current) => ({
+        ...current,
+        pendingAttachments: [...current.pendingAttachments, ...uploaded],
+      }));
       setToast(labels.uploadSuccess);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
@@ -514,10 +669,12 @@ function App() {
       return;
     }
 
+    const conversationId = activeConversation.id;
+    const runtimeAtSend = runtimeByConversation[conversationId] ?? emptyConversationRuntime;
     const attachmentIds = pendingAttachments.map((attachment) => attachment.id);
     const optimisticMessage: ChatMessage = {
       id: `local_${Date.now()}`,
-      conversation_id: activeConversation.id,
+      conversation_id: conversationId,
       role: "user",
       sender: "you",
       content,
@@ -527,34 +684,48 @@ function App() {
       attachment_ids: attachmentIds,
     };
 
-    setMessages((current) => [...current, optimisticMessage]);
-    setInput("");
-    setIsSending(true);
+    updateConversationDetail(conversationId, (current) => ({
+      ...current,
+      messages: [...current.messages, optimisticMessage],
+    }));
+    updateConversationRuntime(conversationId, (current) => ({
+      ...current,
+      input: "",
+      isSending: true,
+      progressSteps: initialProgressSteps(selectedModelId, attachmentIds.length),
+      thinkingStartedAt: Date.now(),
+    }));
     setError("");
-    setProgressSteps(initialProgressSteps(selectedModelId, attachmentIds.length));
     try {
       const response = await sendChatMessage(
         content,
-        activeConversation.id,
+        conversationId,
         selectedAgentIds,
-        quotedMessage?.id,
-        quotedText || quotedMessage?.content,
+        runtimeAtSend.quotedMessage?.id,
+        runtimeAtSend.quotedText || runtimeAtSend.quotedMessage?.content,
         attachmentIds,
         selectedModelId,
         undefined,
         agentMode,
         toolPreferences,
       );
-      applyChatResponse(response);
-      setPendingAttachments([]);
-      setQuotedMessage(null);
-      setQuotedText("");
-      await reloadConversations(activeConversation.id);
+      applyChatResponse(conversationId, response);
+      updateConversationRuntime(conversationId, (current) => ({
+        ...current,
+        pendingAttachments: [],
+        quotedMessage: null,
+        quotedText: "",
+      }));
+      await reloadConversations(conversationId);
+      getAgents().then(setAgents).catch(() => undefined);
     } catch (err) {
-      setProgressSteps((current) => markProgressError(current, err instanceof Error ? err.message : "Send failed"));
+      updateConversationRuntime(conversationId, (current) => ({
+        ...current,
+        progressSteps: markProgressError(current.progressSteps, err instanceof Error ? err.message : "Send failed"),
+      }));
       setError(err instanceof Error ? err.message : "Send failed");
     } finally {
-      setIsSending(false);
+      updateConversationRuntime(conversationId, { isSending: false, thinkingStartedAt: null });
     }
   }
 
@@ -567,12 +738,16 @@ function App() {
       setError(labels.noUserMessage);
       return;
     }
-    setIsSending(true);
-    setProgressSteps(initialProgressSteps(selectedModelId, lastUserMessage.attachment_ids?.length ?? 0));
+    const conversationId = activeConversation.id;
+    updateConversationRuntime(conversationId, {
+      isSending: true,
+      progressSteps: initialProgressSteps(selectedModelId, lastUserMessage.attachment_ids?.length ?? 0),
+      thinkingStartedAt: Date.now(),
+    });
     try {
       const response = await regenerateChatMessage(
         lastUserMessage.content,
-        activeConversation.id,
+        conversationId,
         selectedAgentIds,
         lastUserMessage.id,
         selectedModelId,
@@ -580,38 +755,84 @@ function App() {
         agentMode,
         toolPreferences,
       );
-      applyChatResponse(response);
-      await reloadConversations(activeConversation.id);
+      applyChatResponse(conversationId, response);
+      await reloadConversations(conversationId);
     } catch (err) {
-      setProgressSteps((current) => markProgressError(current, err instanceof Error ? err.message : "Regenerate failed"));
+      updateConversationRuntime(conversationId, (current) => ({
+        ...current,
+        progressSteps: markProgressError(current.progressSteps, err instanceof Error ? err.message : "Regenerate failed"),
+      }));
       setError(err instanceof Error ? err.message : "Regenerate failed");
     } finally {
-      setIsSending(false);
+      updateConversationRuntime(conversationId, { isSending: false, thinkingStartedAt: null });
     }
   }
 
-  function applyChatResponse(response: ChatResponse) {
+  function applyChatResponse(conversationId: string, response: ChatResponse) {
     const traceEvents = response.events ?? [];
     const responseMessages = response.messages.map((message) =>
       message.role === "agent" && !(message.trace_events?.length)
         ? { ...message, trace_events: traceEvents }
         : message,
     );
-    setMessages((current) => [...current, ...responseMessages]);
-    setArtifacts((current) => [...current, ...response.artifacts]);
-    setProgressSteps(progressFromEvents(response.events ?? []));
+    updateConversationDetail(conversationId, (current) => ({
+      ...current,
+      messages: [...current.messages, ...responseMessages],
+      artifacts: [...current.artifacts, ...response.artifacts],
+    }));
+    updateConversationRuntime(conversationId, {
+      progressSteps: progressFromEvents(response.events ?? []),
+    });
   }
 
   async function handleMessagePin(message: ChatMessage) {
     if (!activeConversation) {
       return;
     }
+    const conversationId = activeConversation.id;
     const updated = message.is_pinned
-      ? await unpinMessage(activeConversation.id, message.id)
-      : await pinMessage(activeConversation.id, message.id);
-    setMessages((current) =>
-      current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
-    );
+      ? await unpinMessage(conversationId, message.id)
+      : await pinMessage(conversationId, message.id);
+    updateConversationDetail(conversationId, (current) => ({
+      ...current,
+      messages: current.messages.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+    }));
+  }
+
+  async function handleExtractMemory(message: ChatMessage) {
+    if (!activeConversation) {
+      return;
+    }
+    const conversationId = activeConversation.id;
+    try {
+      const created = await extractMessageMemory(
+        conversationId,
+        message.id,
+        selectedModelId,
+      );
+      const refreshed = await getConversationMemories(conversationId);
+      updateConversationDetail(conversationId, (current) => ({
+        ...current,
+        memories: refreshed,
+      }));
+      setRightPanelOpen(true);
+      setRightTab("context");
+      setToast(created.length ? `已提取 ${created.length} 条智能记忆` : "没有发现新的长期记忆");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Memory extraction failed");
+    }
+  }
+
+  async function handleDeleteMemory(memoryId: string) {
+    if (!activeConversation) {
+      return;
+    }
+    const conversationId = activeConversation.id;
+    await deleteConversationMemory(conversationId, memoryId);
+    updateConversationDetail(conversationId, (current) => ({
+      ...current,
+      memories: current.memories.filter((memory) => memory.id !== memoryId),
+    }));
   }
 
   async function handleApplyDiff(artifact: Artifact) {
@@ -763,8 +984,8 @@ function App() {
         </section>
 
         <section className="status-row">
-          <span className={`status-chip ${isSending ? "running" : ""}`}>
-            {isSending ? labels.running : labels.ready}
+          <span className={`status-chip ${runningConversationCount ? "running" : ""}`}>
+            {runningConversationCount ? `${labels.running} ${runningConversationCount}` : labels.ready}
           </span>
           <button className="archive-toggle small" type="button" onClick={() => setShowArchived((current) => !current)}>
             {showArchived ? labels.showActive : labels.showArchived}
@@ -807,8 +1028,7 @@ function App() {
                 className={`conversation-card ${conversation.id === activeConversationId ? "active" : ""}`}
                 key={conversation.id}
                 onClick={() => {
-                  setActiveConversationId(conversation.id);
-                  setOpenConversationMenuId("");
+                  openConversation(conversation.id);
                 }}
               >
                 <div className="conversation-content">
@@ -837,6 +1057,7 @@ function App() {
                   ) : (
                     <div className="conversation-title-row">
                       <strong>{conversation.title}</strong>
+                      {runtimeByConversation[conversation.id]?.isSending ? <span>{labels.running}</span> : null}
                       {conversation.is_pinned ? <span>{labels.pin}</span> : null}
                     </div>
                   )}
@@ -896,6 +1117,23 @@ function App() {
       />
 
       <section className="chat-panel">
+        <nav className="conversation-tabs" aria-label="Open conversations">
+          {openConversationIds.map((conversationId) => {
+            const conversation = conversations.find((item) => item.id === conversationId);
+            if (!conversation) {
+              return null;
+            }
+            return (
+              <div className={conversationId === activeConversationId ? "active" : ""} key={conversationId}>
+                <button type="button" onClick={() => openConversation(conversationId)}>
+                  {runtimeByConversation[conversationId]?.isSending ? "● " : ""}
+                  {conversation.title}
+                </button>
+                <button aria-label={`Close ${conversation.title}`} type="button" onClick={() => closeConversationTab(conversationId)}>×</button>
+              </div>
+            );
+          })}
+        </nav>
         <header className="chat-header">
           <div>
             <h1>{activeConversation?.title ?? labels.emptyTitle}</h1>
@@ -919,6 +1157,7 @@ function App() {
                 key={message.id}
                 labels={labels}
                 message={message}
+                onExtractMemory={() => handleExtractMemory(message)}
                 onPin={() => handleMessagePin(message)}
                 onQuote={() => {
                   setQuotedMessage(message);
@@ -940,6 +1179,7 @@ function App() {
               agentMode={agentMode}
               attachmentCount={pendingAttachments.length}
               modelId={selectedModelId}
+              startedAt={activeRuntime.thinkingStartedAt}
               toolPreferences={toolPreferences}
             />
           ) : null}
@@ -1034,7 +1274,7 @@ function App() {
       />
       <aside className={`right-panel ${rightPanelOpen ? "open" : ""}`}>
         <div className="right-tabs">
-          {(["artifacts", "agents", "tools", "context"] as RightPanelTab[]).map((tab) => (
+          {visibleRightTabs.map((tab) => (
             <button className={rightTab === tab ? "active" : ""} key={tab} type="button" onClick={() => setRightTab(tab)}>
               {rightTabLabel(tab)}
             </button>
@@ -1043,7 +1283,7 @@ function App() {
         <RightPanelContent
           activeConversation={activeConversation}
           agents={agents}
-          artifacts={artifacts}
+          artifacts={visibleArtifacts}
           attachments={attachments}
           labels={labels}
           onApply={handleApplyDiff}
@@ -1056,6 +1296,8 @@ function App() {
           agentDraft={agentDraft}
           setAgentDraft={setAgentDraft}
           pinnedMessages={pinnedMessages}
+          memories={activeDetail.memories}
+          onDeleteMemory={handleDeleteMemory}
           previewArtifact={previewArtifact}
           selectedAgentIds={selectedAgentIds}
           tab={rightTab}
@@ -1145,6 +1387,7 @@ function MessageCard({
   attachmentMap,
   labels: t,
   message,
+  onExtractMemory,
   onPin,
   onQuote,
   onQuoteSelected,
@@ -1155,6 +1398,7 @@ function MessageCard({
   attachmentMap: Map<string, Attachment>;
   labels: typeof labels;
   message: ChatMessage;
+  onExtractMemory: () => void;
   onPin: () => void;
   onQuote: () => void;
   onQuoteSelected: (text: string) => void;
@@ -1185,6 +1429,7 @@ function MessageCard({
               }
             }}>{t.selectedQuote}</button>
             <button type="button" onClick={onPin}>{message.is_pinned ? t.unpinMessage : t.pinMessage}</button>
+            <button type="button" onClick={onExtractMemory}>智能记忆</button>
           </div>
         </header>
         {message.role === "agent" ? (
@@ -1252,12 +1497,14 @@ function LiveThinkingPanel({
   agentMode,
   attachmentCount,
   modelId,
+  startedAt,
   toolPreferences,
 }: {
   agentIds: string[];
   agentMode: "single" | "multi";
   attachmentCount: number;
   modelId: string;
+  startedAt: number | null;
   toolPreferences: ToolPreferences;
 }) {
   const selectedAgents = agentIds.length ? agentIds.map((agentId) => displayAgentName(agentId)).join("、") : "智能体（Agent）";
@@ -1265,15 +1512,20 @@ function LiveThinkingPanel({
   const enabledTools = (Object.keys(toolPreferences) as Array<keyof ToolPreferences>)
     .filter((key) => toolPreferences[key])
     .map(toolLabel);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    setElapsedSeconds(0);
+    if (!startedAt) {
+      return;
+    }
+    setNow(Date.now());
     const timer = window.setInterval(() => {
-      setElapsedSeconds((current) => current + 1);
+      setNow(Date.now());
     }, 1000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [startedAt]);
+
+  const elapsedSeconds = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0;
 
   return (
     <article className="message-card agent live-thinking-row">
@@ -1347,9 +1599,11 @@ function RightPanelContent({
   artifacts,
   attachments,
   labels: t,
+  memories,
   onApply,
   onClosePreview,
   onCreateAgent,
+  onDeleteMemory,
   onEdit,
   onPreview,
   onRestoreVersion,
@@ -1367,9 +1621,11 @@ function RightPanelContent({
   artifacts: Artifact[];
   attachments: Attachment[];
   labels: typeof labels;
+  memories: ConversationMemory[];
   onApply: (artifact: Artifact) => void;
   onClosePreview: () => void;
   onCreateAgent: (event: FormEvent) => void;
+  onDeleteMemory: (memoryId: string) => void;
   onEdit: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
   onRestoreVersion: (artifact: Artifact, versionId: string) => void;
@@ -1386,25 +1642,41 @@ function RightPanelContent({
     return (
       <div className="right-content">
         <form className="side-card agent-create-form" onSubmit={onCreateAgent}>
-          <strong>{t.createAgent}</strong>
-          <input
-            value={agentDraft.name ?? ""}
-            onChange={(event) => setAgentDraft((current) => ({ ...current, name: event.target.value }))}
-            placeholder="智能体名称（Agent name）"
-          />
-          <input
-            value={agentDraft.description ?? ""}
-            onChange={(event) => setAgentDraft((current) => ({ ...current, description: event.target.value }))}
-            placeholder="Description"
-          />
-          <textarea
-            value={agentDraft.system_prompt ?? ""}
-            onChange={(event) => setAgentDraft((current) => ({ ...current, system_prompt: event.target.value }))}
-            placeholder={t.systemPrompt}
-          />
+          <div className="agent-form-title">
+            <AvatarBadge value="custom_agent" className="agent-form-avatar" />
+            <div>
+              <strong>创建智能体（Agent）</strong>
+              <small>Create a custom agent with tools and skills.</small>
+            </div>
+          </div>
+          <label className="agent-form-field">
+            <span>智能体名称（Agent name）</span>
+            <input
+              value={agentDraft.name ?? ""}
+              onChange={(event) => setAgentDraft((current) => ({ ...current, name: event.target.value }))}
+              placeholder="例如：数据分析智能体（Data Analyst）"
+            />
+          </label>
+          <label className="agent-form-field">
+            <span>职责描述（Description）</span>
+            <input
+              value={agentDraft.description ?? ""}
+              onChange={(event) => setAgentDraft((current) => ({ ...current, description: event.target.value }))}
+              placeholder="说明这个智能体负责什么任务"
+            />
+          </label>
+          <label className="agent-form-field">
+            <span>系统提示词（System Prompt）</span>
+            <textarea
+              value={agentDraft.system_prompt ?? ""}
+              onChange={(event) => setAgentDraft((current) => ({ ...current, system_prompt: event.target.value }))}
+              placeholder="定义角色、边界、输出格式和工作约束"
+            />
+          </label>
+          <span className="agent-form-label">可用工具（Available tools）</span>
           <div className="agent-picker">
             {tools.map((tool) => (
-              <label key={tool.id}>
+              <label className="tool-choice" key={tool.id}>
                 <input
                   checked={(agentDraft.tools ?? []).includes(tool.id)}
                   type="checkbox"
@@ -1420,11 +1692,14 @@ function RightPanelContent({
                     })
                   }
                 />
-                <span>{tool.name ?? tool.id}</span>
+                <span>
+                  {tool.name ?? tool.id}
+                  <small>{tool.id}</small>
+                </span>
               </label>
             ))}
           </div>
-          <button type="submit">{t.createAgent}</button>
+          <button type="submit">创建智能体（Agent）</button>
         </form>
         {selected.map((agent) => (
           <section className="side-card agent-side-card" key={agent.id}>
@@ -1450,13 +1725,10 @@ function RightPanelContent({
   if (tab === "tools") {
     return (
       <div className="right-content">
-        {tools.map((tool) => (
-          <section className="side-card" key={tool.id}>
-            <strong>{tool.name ?? tool.id}</strong>
-            <p>{tool.description ?? tool.id}</p>
-            <small>{tool.id}</small>
-          </section>
-        ))}
+        <section className="side-card">
+          <strong>Tools module hidden</strong>
+          <p>工具能力仍可被智能体调用，但不再作为独立右侧模块展示。</p>
+        </section>
       </div>
     );
   }
@@ -1471,6 +1743,16 @@ function RightPanelContent({
         <section className="side-card">
           <strong>Pinned Messages</strong>
           {pinnedMessages.length ? pinnedMessages.map((message) => <p key={message.id}>{message.content}</p>) : <p>暂无长期记忆</p>}
+        </section>
+        <section className="side-card">
+          <strong>LLM 智能记忆</strong>
+          {memories.length ? memories.map((memory) => (
+            <div className="memory-item" key={memory.id}>
+              <small>{memory.category} · {Math.round(memory.confidence * 100)}%</small>
+              <p>{memory.content}</p>
+              <button type="button" onClick={() => onDeleteMemory(memory.id)}>删除</button>
+            </div>
+          )) : <p>暂无 LLM 提取的长期记忆</p>}
         </section>
         <section className="side-card">
           <strong>Attachments</strong>
@@ -1948,6 +2230,20 @@ function toolLabel(key: keyof ToolPreferences): string {
     preview: "预览",
     diff: "Diff",
   }[key];
+}
+
+function latestVisibleArtifacts(artifacts: Artifact[]): Artifact[] {
+  const latestPrimaryArtifact = [...artifacts].reverse().find((artifact) => (
+    artifact.type === "code"
+    || artifact.type === "preview"
+    || artifact.type === "deployment"
+    || artifact.type === "document_preview"
+    || artifact.type === "presentation_preview"
+    || artifact.type === "diff"
+    || artifact.type === "conflict"
+  ));
+  const latest = latestPrimaryArtifact ?? artifacts[artifacts.length - 1];
+  return latest ? [latest] : [];
 }
 
 function rightTabLabel(tab: RightPanelTab): string {

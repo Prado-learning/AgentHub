@@ -82,6 +82,7 @@ class OpenAIChatAdapter:
             f"Conversation mode: {context.mode}\n"
             f"Agent skills:\n{self._format_skills()}\n\n"
             f"Pinned long-term context:\n{self._format_pinned_context(context)}\n\n"
+            f"LLM memories:\n{self._format_memories(context)}\n\n"
             f"Conversation summary:\n{self._format_summary(context)}\n\n"
             f"Current attachments:\n{self._format_attachments(context)}\n\n"
             f"Recent history:\n{history}\n\n"
@@ -101,6 +102,17 @@ class OpenAIChatAdapter:
             total_limit=2400,
             empty="No pinned context.",
         )
+
+    def _format_memories(self, context: RunContext) -> str:
+        if not context.conversation_memories:
+            return "No long-term memories."
+        lines = []
+        for memory in context.conversation_memories:
+            category = str(memory.get("category") or "memory")
+            content = str(memory.get("content") or "").strip()
+            if content:
+                lines.append(f"- [{category}] {content}")
+        return "\n".join(lines) if lines else "No long-term memories."
 
     def _format_summary(self, context: RunContext) -> str:
         if not context.conversation_summary:

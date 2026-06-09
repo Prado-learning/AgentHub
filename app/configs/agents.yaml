@@ -15,6 +15,8 @@ agents:
       - file_reader_tool
       - image_reader_tool
       - preview_tool
+      - deploy_tool
+      - ui_builder_tool
   - id: codex
     name: Code Agent
     type: external_agent
@@ -29,6 +31,7 @@ agents:
       - skills/code_agent.md
     tools:
       - file_reader_tool
+      - document_preview_tool
       - code_review_tool
   - id: ui_builder
     name: UI Builder
@@ -42,6 +45,7 @@ agents:
     skills:
       - skills/ui_builder.md
     tools:
+      - ui_builder_tool
       - preview_tool
       - file_reader_tool
   - id: code_reviewer
@@ -81,3 +85,4 @@ agents:
       - skills/file_analyst.md
     tools:
       - file_reader_tool
+      - document_preview_tool

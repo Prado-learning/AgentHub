@@ -13,6 +13,7 @@ class RunContext:
     selected_agents: list[str]
     mode: Literal["single", "group"] = "group"
     pinned_context: list[dict] | None = None
+    conversation_memories: list[dict] | None = None
     conversation_summary: dict | None = None
     attachments: list[dict] | None = None
     tool_preferences: dict | None = None

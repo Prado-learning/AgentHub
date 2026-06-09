@@ -8,6 +8,7 @@ import type {
   ChatResponse,
   Conversation,
   ConversationCreateInput,
+  ConversationMemory,
   ConversationUpdateInput,
   ModelOption,
   StructuredDiff,
@@ -286,6 +287,45 @@ export async function unpinMessage(
     { method: "PATCH" },
   );
   return data.message;
+}
+
+export async function getConversationMemories(
+  conversationId: string,
+): Promise<ConversationMemory[]> {
+  const data = await request<{ memories: ConversationMemory[] }>(
+    `/conversations/${conversationId}/memories`,
+  );
+  return data.memories;
+}
+
+export async function extractMessageMemory(
+  conversationId: string,
+  messageId: string,
+  modelProvider?: string,
+  modelName?: string,
+): Promise<ConversationMemory[]> {
+  const data = await request<{ memories: ConversationMemory[] }>(
+    `/conversations/${conversationId}/messages/${messageId}/extract-memory`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        model_provider: modelProvider,
+        model_name: modelName,
+      }),
+    },
+  );
+  return data.memories;
+}
+
+export async function deleteConversationMemory(
+  conversationId: string,
+  memoryId: string,
+): Promise<ConversationMemory> {
+  const data = await request<{ memory: ConversationMemory }>(
+    `/conversations/${conversationId}/memories/${memoryId}`,
+    { method: "DELETE" },
+  );
+  return data.memory;
 }
 
 export async function applyArtifactDiff(artifactId: string): Promise<{

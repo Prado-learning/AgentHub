@@ -8,6 +8,7 @@ class AgentContextBuilder:
         return {
             "history": context.history[-8:],
             "pinned_context": context.pinned_context or [],
+            "conversation_memories": context.conversation_memories or [],
             "attachments": context.attachments or [],
             "workspace_dir": context.workspace_dir,
         }

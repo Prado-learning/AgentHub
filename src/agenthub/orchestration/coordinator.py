@@ -14,6 +14,10 @@ from agenthub.adapters.mock.adapter import MockAgentAdapter
 from agenthub.artifacts.conflict_resolver import resolve_artifact_conflicts
 from agenthub.tools.executor import ToolExecutor
 from agenthub.tools.schemas import ToolResult
+from agenthub.application.agents.runtime_profile import (
+    AgentRuntimeProfile,
+    load_agent_runtime_profiles,
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,9 @@ class HarnessRunner:
     tool_executor: ToolExecutor = field(default_factory=ToolExecutor)
     max_parallel_steps: int = 4
     events: list[RunEvent] = field(default_factory=list)
+    agent_profiles: dict[str, AgentRuntimeProfile] = field(
+        default_factory=load_agent_runtime_profiles
+    )
 
     def run(self, context: RunContext) -> RunResult:
         self.events = []
@@ -42,6 +49,7 @@ class HarnessRunner:
         orchestrator = Orchestrator(
             available_agent_ids=list(self.adapters),
             available_tool_ids=self.tool_executor.registry.list_ids(),
+            agent_profiles=self.agent_profiles,
         )
         plan = orchestrator.plan(context)
         run_events.append(
@@ -245,7 +253,13 @@ class HarnessRunner:
         context: RunContext,
     ) -> list[dict]:
         tool_artifacts: list[dict] = []
+        profile = self.agent_profiles.get(step.agent_id)
+        allowed_tools = set(profile.tools if profile else [])
         for tool_id in tool_ids:
+            if tool_id not in allowed_tools:
+                raise PermissionError(
+                    f"Agent {step.agent_id} is not allowed to use tool {tool_id}"
+                )
             kwargs = tool_kwargs_for(tool_id, artifacts, step, context)
             self._record_event(
                 "tool.started",

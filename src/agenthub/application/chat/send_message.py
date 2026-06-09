@@ -8,6 +8,8 @@ from agenthub.adapters import build_agent_adapters_from_env
 from app.api.services.artifact_service import save_artifacts
 from app.api.services.attachment_service import get_attachment_records_by_ids
 from app.api.services.context_summary_service import get_or_update_summary
+from app.api.services.memory_service import list_memories
+from app.api.services.agent_creation_service import handle_agent_creation_message
 from app.api.services.conversation_service import (
     add_message,
     deactivate_generation_group,
@@ -41,7 +43,27 @@ class SendMessageUseCase:
         )
         history = list_messages(conversation_id)
         attachments = get_attachment_records_by_ids(attachment_ids)
-        summary = get_or_update_summary(conversation_id, history)
+        agent_creation = handle_agent_creation_message(
+            conversation_id,
+            message["content"],
+            history,
+            model_provider=request.get("model_provider"),
+            model_name=request.get("model_name"),
+        )
+        if agent_creation is not None:
+            return self._save_agent_creation_response(
+                conversation_id,
+                saved_user_message,
+                agent_creation,
+            )
+        summary = get_or_update_summary(
+            conversation_id,
+            history,
+            model_provider=request.get("model_provider"),
+            model_name=request.get("model_name"),
+        )
+        pinned_context = list_pinned_messages(conversation_id)
+        conversation_memories = list_memories(conversation_id)
 
         context = RunContext(
             conversation_id=conversation_id,
@@ -49,7 +71,8 @@ class SendMessageUseCase:
             history=history,
             selected_agents=request.get("selected_agents") or conversation.get("agent_ids", []),
             mode="single" if request.get("agent_mode") == "single" else conversation.get("mode", "group"),
-            pinned_context=list_pinned_messages(conversation_id),
+            pinned_context=pinned_context,
+            conversation_memories=conversation_memories,
             conversation_summary=summary,
             attachments=attachments,
             tool_preferences=request.get("tool_preferences") or {},
@@ -113,6 +136,49 @@ class SendMessageUseCase:
             "messages": saved_agent_messages,
             "artifacts": saved_artifacts,
             "events": trace_events,
+        }
+
+    def _save_agent_creation_response(
+        self,
+        conversation_id: str,
+        saved_user_message: dict,
+        result: dict,
+    ) -> dict:
+        event_type = (
+            "agent.created"
+            if result.get("status") == "created"
+            else "agent.creation_collecting"
+        )
+        trace_events = _trace_events(
+            [
+                {
+                    "type": event_type,
+                    "payload": {
+                        "status": result.get("status"),
+                        "agent_id": (result.get("agent") or {}).get("id"),
+                    },
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            run_id=f"agent_creation_{saved_user_message['id']}",
+        )
+        saved_message = add_message(
+            conversation_id=conversation_id,
+            role="agent",
+            sender="orchestrator",
+            content=str(result.get("content") or ""),
+            format="markdown",
+            generation_group_id=saved_user_message["id"],
+            generation_index=1,
+            trace_events=trace_events,
+        )
+        return {
+            "run_id": f"agent_creation_{saved_user_message['id']}",
+            "status": "failed" if result.get("status") == "failed" else "success",
+            "messages": [saved_message],
+            "artifacts": [],
+            "events": trace_events,
+            "created_agent": result.get("agent"),
         }
 
 
