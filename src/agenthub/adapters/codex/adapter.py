@@ -5,6 +5,7 @@ import os
 from agenthub.adapters.base import AgentResult, AgentTask
 from agenthub.domain.run import RunContext
 from agenthub.adapters.openai_chat.client import OpenAICompatibleProvider
+from agenthub.adapters.process_adapter import run_cli_agent
 from agenthub.runtime.prompt_builder import format_messages_for_prompt
 
 
@@ -34,6 +35,16 @@ class CodexAdapter:
     def run(self, task: AgentTask, context: RunContext) -> AgentResult:
         default_mode = "llm" if os.environ.get("ENABLE_REAL_LLM", "").lower() in {"1", "true", "yes", "on"} else "mock"
         mode = os.environ.get("CODEX_MODE", default_mode).strip().lower()
+        if mode in {"cli", "process", "codex_cli"}:
+            return run_cli_agent(
+                agent_id=self.id,
+                name=self.name,
+                task=task,
+                context=context,
+                env_command_key="CODEX_COMMAND",
+                default_command=os.environ.get("CODEX_CLI", ""),
+                skills=self.skills,
+            )
         if mode in {"llm", "openai", "openai_chat"}:
             return self._run_with_openai_compatible(task, context)
         return self._run_mock(task, context)

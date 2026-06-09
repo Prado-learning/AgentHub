@@ -110,6 +110,20 @@ export async function createAgent(input: AgentCreateInput): Promise<Agent> {
   return data.agent;
 }
 
+export async function updateAgent(agentId: string, input: AgentCreateInput): Promise<Agent> {
+  const data = await request<{ agent: Agent }>(`/agents/${agentId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  return data.agent;
+}
+
+export async function deleteAgent(agentId: string): Promise<void> {
+  await request<{ deleted: boolean }>(`/agents/${agentId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getModels(): Promise<ModelOption[]> {
   const data = await request<{ models: ModelOption[] }>("/models");
   return data.models;

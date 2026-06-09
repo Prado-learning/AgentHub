@@ -36,7 +36,9 @@ def test_harness_runner_dispatches_ui_request_through_adapters() -> None:
     assert [message["sender"] for message in result.messages] == [
         "ui_builder",
         "code_reviewer",
+        "orchestrator",
     ]
+    assert "Orchestrator summary" in result.messages[-1]["content"]
     assert [artifact["type"] for artifact in result.artifacts] == [
         "code",
         "preview",

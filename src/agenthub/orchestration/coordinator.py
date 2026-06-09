@@ -160,6 +160,15 @@ class HarnessRunner:
                 },
             )
         )
+        messages.append(
+            self._summary_message(
+                plan_steps=plan.steps,
+                step_results=step_results,
+                artifacts=artifacts,
+                conflicts=conflicts,
+                status=status,
+            )
+        )
         return RunResult(
             run_id=f"run_{uuid4().hex[:12]}",
             status=status,
@@ -384,3 +393,52 @@ class HarnessRunner:
         if "success" in statuses:
             return "partial_success"
         return "failed"
+
+    def _summary_message(
+        self,
+        *,
+        plan_steps: list[PlanStep],
+        step_results: dict[str, StepExecutionResult],
+        artifacts: list[dict],
+        conflicts: list[object],
+        status: str,
+    ) -> dict:
+        agent_lines: list[str] = []
+        for step in plan_steps:
+            result = step_results.get(step.id)
+            state = result.status if result else "pending"
+            detail = f"{step.agent_id}: {state}"
+            if result and result.error:
+                detail = f"{detail} ({result.error})"
+            agent_lines.append(f"- {detail}")
+
+        artifact_lines = [
+            f"- {artifact.get('type', 'artifact')}: {artifact.get('title') or artifact.get('id')}"
+            for artifact in artifacts[:8]
+        ]
+        if len(artifacts) > 8:
+            artifact_lines.append(f"- ... {len(artifacts) - 8} more artifacts")
+
+        content = [
+            "Orchestrator summary",
+            "",
+            f"- Status: {status}",
+            f"- Agents completed: {len(step_results)}",
+            f"- Artifacts: {len(artifacts)}",
+            f"- Conflicts: {len(conflicts)}",
+        ]
+        if agent_lines:
+            content.extend(["", "Agent results:", *agent_lines])
+        if artifact_lines:
+            content.extend(["", "Artifacts produced:", *artifact_lines])
+        if conflicts:
+            content.append("")
+            content.append("Conflict artifacts were emitted so you can compare candidates before applying changes.")
+        content.append("")
+        content.append("Review the inline cards below this message or open the artifact panel for details.")
+        return {
+            "role": "agent",
+            "sender": "orchestrator",
+            "content": "\n".join(content),
+            "format": "markdown",
+        }

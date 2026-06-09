@@ -3,6 +3,9 @@
 import struct
 from pathlib import Path
 
+from agenthub.adapters.openai_chat.client import OpenAICompatibleProvider
+from agenthub.infrastructure.config.env import env_flag, load_env_file
+from agenthub.infrastructure.config.models import resolve_model_selection
 from agenthub.tools.schemas import ToolResult
 
 
@@ -21,6 +24,7 @@ def image_reader_tool(attachments: list[dict] | None = None, **_: object) -> Too
             content="No image attachments were provided.",
         )
 
+    semantic_summary = _semantic_image_summary(images)
     sections = []
     for image in images:
         path = Path(str(image.get("file_path", "")))
@@ -33,9 +37,17 @@ def image_reader_tool(attachments: list[dict] | None = None, **_: object) -> Too
                     f"- MIME type: {image.get('mime_type') or 'unknown'}",
                     f"- File size: {image.get('size') or 0} bytes",
                     f"- Image size: {size_text}",
-                    "- Visual note: this tool extracted image metadata. For semantic visual understanding, route the task to a vision-capable model or Vision Agent.",
+                    "- Visual note: metadata extracted locally.",
                 ]
             )
+        )
+    if semantic_summary:
+        sections.append(f"## Semantic visual analysis\n\n{semantic_summary}")
+    else:
+        sections.append(
+            "## Semantic visual analysis\n\n"
+            "No vision model was configured for this tool run. Route to Vision Agent with a "
+            "vision-capable provider for semantic image understanding."
         )
 
     return ToolResult(
@@ -44,6 +56,31 @@ def image_reader_tool(attachments: list[dict] | None = None, **_: object) -> Too
         title="Image Reading Result",
         content="\n\n".join(sections),
     )
+
+
+def _semantic_image_summary(images: list[dict]) -> str:
+    load_env_file()
+    if not env_flag("ENABLE_REAL_LLM"):
+        return ""
+    provider_id = "doubao"
+    try:
+        selection = resolve_model_selection(provider_id, None)
+        if not selection.api_key or not selection.base_url or not selection.model_name:
+            return ""
+        provider = OpenAICompatibleProvider(
+            model=selection.model_name,
+            api_key=selection.api_key,
+            base_url=selection.base_url,
+        )
+        return provider.complete_with_attachments(
+            (
+                "Analyze the attached image(s) semantically. Describe visible UI, text, "
+                "objects, layout, risks, and actionable observations in concise markdown."
+            ),
+            images,
+        )
+    except Exception as exc:
+        return f"Vision analysis failed, metadata fallback is still available. Error: {exc}"
 
 
 def _image_size(path: Path) -> tuple[int | None, int | None]:

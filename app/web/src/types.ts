@@ -95,6 +95,14 @@ export type Artifact = {
   conflict_group?: string;
   conflict_type?: string;
   conflict_target?: string;
+  conflict_candidates?: Array<{
+    artifact_id: string;
+    title: string;
+    producer_agent_id: string;
+    content_preview: string;
+  }>;
+  recommended_resolution?: string;
+  requires_user_choice?: boolean;
   status?: "pending" | "applied" | "failed" | "rolled_back";
   apply_id?: string;
   target_files?: string[];
@@ -105,6 +113,8 @@ export type Artifact = {
   mime_type?: string;
   filename?: string;
   producer_agent_id?: string;
+  source_artifact_id?: string;
+  render_mode?: string;
 };
 
 export type ArtifactVersion = {

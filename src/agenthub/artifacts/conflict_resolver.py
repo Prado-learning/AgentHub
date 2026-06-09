@@ -10,6 +10,7 @@ class Conflict:
     target: str
     producers: list[str]
     resolution: str
+    candidates: list[dict]
 
 
 def resolve_artifact_conflicts(artifacts: list[dict]) -> tuple[list[dict], list[Conflict]]:
@@ -61,6 +62,15 @@ def _detect_file_path_conflicts(artifacts: list[dict]) -> list[Conflict]:
                     target=file_path,
                     producers=producers,
                     resolution="kept all candidates and emitted a conflict artifact",
+                    candidates=[
+                        {
+                            "artifact_id": str(candidate.get("id") or ""),
+                            "title": str(candidate.get("title") or file_path),
+                            "producer_agent_id": str(candidate.get("producer_agent_id") or "unknown"),
+                            "content_preview": str(candidate.get("content") or "")[:600],
+                        }
+                        for candidate in candidates
+                    ],
                 )
             )
     return conflicts
@@ -75,10 +85,14 @@ def _conflict_to_artifact(conflict: Conflict) -> dict:
             f"Conflict type: {conflict.type}\n"
             f"Target: {conflict.target}\n"
             f"Producers: {', '.join(conflict.producers)}\n"
-            f"Resolution: {conflict.resolution}"
+            f"Resolution: {conflict.resolution}\n"
+            "Recommended action: compare candidates and choose the version to apply."
         ),
         "conflict_type": conflict.type,
         "conflict_target": conflict.target,
+        "conflict_candidates": conflict.candidates,
+        "recommended_resolution": "manual_review",
+        "requires_user_choice": True,
         "producer_agent_id": "conflict_resolver",
     }
 

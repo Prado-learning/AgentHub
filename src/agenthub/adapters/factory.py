@@ -3,8 +3,10 @@
 import os
 
 from agenthub.adapters.base import AgentAdapter
+from agenthub.adapters.claude_code.adapter import ClaudeCodeAdapter
 from agenthub.adapters.codex.adapter import CodexAdapter
 from agenthub.adapters.mock.adapter import MockAgentAdapter
+from agenthub.adapters.opencode.adapter import OpenCodeAdapter
 from agenthub.adapters.openai_chat.adapter import OpenAIChatAdapter
 from agenthub.infrastructure.config.env import env_flag, load_env_file
 from agenthub.infrastructure.config.models import ModelSelection, resolve_model_selection
@@ -47,6 +49,20 @@ def build_agent_adapters(
                 model=resolved_model,
                 api_key=resolved_api_key,
                 base_url=resolved_base_url,
+                capabilities=config.get("capabilities"),
+                skills=_configured_skills(agent_id, config),
+            )
+        elif adapter_type == "claude_code":
+            adapters[agent_id] = ClaudeCodeAdapter(
+                agent_id=agent_id,
+                name=config.get("name"),
+                capabilities=config.get("capabilities"),
+                skills=_configured_skills(agent_id, config),
+            )
+        elif adapter_type == "opencode":
+            adapters[agent_id] = OpenCodeAdapter(
+                agent_id=agent_id,
+                name=config.get("name"),
                 capabilities=config.get("capabilities"),
                 skills=_configured_skills(agent_id, config),
             )

@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.api.services.conversation_store import JsonStore
+from agenthub.tools.builtin.preview import (
+    build_preview_html_for_code,
+    extract_previewable_html,
+)
 
 
 RUNTIME_DIR = Path("agent-workspace/runtime")
@@ -64,6 +68,11 @@ def save_artifacts(conversation_id: str, run_id: str, artifacts: list[dict]) -> 
         records.append(saved_artifact)
         _record_version(saved_artifact, "created")
         saved.append(_public_artifact(saved_artifact))
+        derived_preview = _derived_preview_artifact(saved_artifact)
+        if derived_preview is not None:
+            records.append(derived_preview)
+            _record_version(derived_preview, "created")
+            saved.append(_public_artifact(derived_preview))
     ARTIFACTS.write(records)
     return saved
 
@@ -167,6 +176,42 @@ def _record_version(artifact: dict, reason: str) -> None:
         }
     )
     ARTIFACT_VERSIONS.write(versions)
+
+
+def _derived_preview_artifact(artifact: dict) -> dict | None:
+    if artifact.get("type") != "code":
+        return None
+    content = str(artifact.get("content") or "")
+    metadata = (
+        f"{artifact.get('language') or ''} "
+        f"{artifact.get('file_path') or ''} "
+        f"{artifact.get('title') or ''}"
+    ).lower()
+    if not extract_previewable_html(content) and not any(
+        marker in metadata for marker in ("html", ".htm")
+    ):
+        return None
+
+    title = f"Preview: {artifact.get('title') or 'Generated HTML'}"
+    preview_html, render_mode = build_preview_html_for_code(title, content)
+    artifact_id = f"preview_{artifact.get('id', uuid4().hex[:8])}"
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    preview_path = PREVIEW_DIR / f"{artifact_id}.html"
+    preview_path.write_text(preview_html, encoding="utf-8")
+    return {
+        "id": artifact_id,
+        "type": "preview",
+        "title": title,
+        "content": f"Preview derived from {artifact.get('title') or artifact.get('id')}.",
+        "preview_url": f"/artifacts/{artifact_id}/preview",
+        "preview_file": str(preview_path),
+        "conversation_id": artifact.get("conversation_id"),
+        "run_id": artifact.get("run_id"),
+        "producer_agent_id": artifact.get("producer_agent_id"),
+        "step_id": artifact.get("step_id"),
+        "source_artifact_id": artifact.get("id"),
+        "render_mode": render_mode,
+    }
 
 
 def _default_preview_html(title: str) -> str:

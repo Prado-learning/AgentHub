@@ -49,7 +49,7 @@ def test_chat_returns_runner_agents_artifacts_and_persists_history(
     data = response.json()
     assert response.status_code == 200
     assert data["status"] == "success"
-    assert len(data["messages"]) == 2
+    assert len(data["messages"]) == 3
     assert len(data["artifacts"]) == 3
     assert any(event["type"] == "context.loaded" for event in data["events"])
     assert any(event["type"] == "run.planned" for event in data["events"])
@@ -60,9 +60,9 @@ def test_chat_returns_runner_agents_artifacts_and_persists_history(
     history_response = client.get("/conversations/conv_demo/messages")
     history = history_response.json()["messages"]
     assert history_response.status_code == 200
-    assert len(history) == 3
+    assert len(history) == 4
     assert history[0]["role"] == "user"
-    assert history[-1]["sender"] == "code_reviewer"
+    assert history[-1]["sender"] == "orchestrator"
     assert history[-1]["trace_events"]
 
 

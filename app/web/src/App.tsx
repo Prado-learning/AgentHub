@@ -5,6 +5,7 @@ import {
   archiveConversation,
   createAgent,
   createConversation,
+  deleteAgent,
   deleteConversation,
   deleteConversationMemory,
   extractMessageMemory,
@@ -30,6 +31,7 @@ import {
   unpinConversation,
   unpinMessage,
   updateArtifact,
+  updateAgent,
   updateConversation,
   uploadAttachment,
 } from "./api";
@@ -46,6 +48,7 @@ import type {
   ConversationMemory,
   ModelOption,
   StructuredDiff,
+  StructuredDiffLine,
   TraceEvent,
   ToolOption,
   ToolPreferences,
@@ -200,7 +203,12 @@ function App() {
     system_prompt: "",
     capabilities: ["text"],
     tools: [],
+    avatar: "",
+    model_provider: undefined,
+    model_name: "",
   });
+  const [editingAgentId, setEditingAgentId] = useState("");
+  const [agentEditorDraft, setAgentEditorDraft] = useState<AgentCreateInput | null>(null);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
@@ -244,6 +252,10 @@ function App() {
   const attachmentMap = useMemo(
     () => new Map(attachments.map((attachment) => [attachment.id, attachment])),
     [attachments],
+  );
+  const artifactMap = useMemo(
+    () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
+    [artifacts],
   );
   const visibleArtifacts = useMemo(() => latestVisibleArtifacts(artifacts), [artifacts]);
   const mentionAgents = useMemo(() => {
@@ -895,8 +907,60 @@ function App() {
       system_prompt: "",
       capabilities: ["text"],
       tools: [],
+      avatar: "",
+      model_provider: undefined,
+      model_name: "",
     });
     setToast("智能体（Agent）已创建");
+  }
+
+  function beginEditAgent(agent: Agent) {
+    if (!agent.is_custom) {
+      return;
+    }
+    setEditingAgentId(agent.id);
+    setAgentEditorDraft({
+      id: agent.id,
+      name: agent.name,
+      description: agent.description,
+      system_prompt: agent.system_prompt ?? "",
+      capabilities: agent.capabilities ?? ["text"],
+      tools: agent.tools ?? [],
+      model_provider: agent.model_provider,
+      model_name: agent.model_name,
+      avatar: agent.avatar,
+    });
+  }
+
+  async function handleSaveAgent(event: FormEvent) {
+    event.preventDefault();
+    if (!editingAgentId || !agentEditorDraft?.name?.trim()) {
+      return;
+    }
+    const updated = await updateAgent(editingAgentId, agentEditorDraft);
+    setAgents((current) => current.map((agent) => (agent.id === updated.id ? updated : agent)));
+    setEditingAgentId("");
+    setAgentEditorDraft(null);
+    setToast("Agent updated");
+  }
+
+  async function handleDeleteAgent(agent: Agent) {
+    if (!agent.is_custom) {
+      return;
+    }
+    await deleteAgent(agent.id);
+    setAgents((current) => current.filter((item) => item.id !== agent.id));
+    setConversations((current) =>
+      current.map((conversation) => ({
+        ...conversation,
+        agent_ids: conversation.agent_ids.filter((agentId) => agentId !== agent.id),
+      })),
+    );
+    if (editingAgentId === agent.id) {
+      setEditingAgentId("");
+      setAgentEditorDraft(null);
+    }
+    setToast("Agent deleted");
   }
 
   function openCodeEditor(artifact: Artifact) {
@@ -906,8 +970,6 @@ function App() {
 
   function openArtifactPreview(artifact: Artifact) {
     setPreviewArtifact(artifact);
-    setRightPanelOpen(true);
-    setRightTab("artifacts");
   }
 
   async function handleSaveArtifact() {
@@ -1198,10 +1260,12 @@ function App() {
             messages.map((message) => (
               <MessageCard
                 attachmentMap={attachmentMap}
+                artifactMap={artifactMap}
                 key={message.id}
                 labels={labels}
                 message={message}
                 onExtractMemory={() => handleExtractMemory(message)}
+                onApply={handleApplyDiff}
                 onPin={() => handleMessagePin(message)}
                 onQuote={() => {
                   setQuotedMessage(message);
@@ -1211,7 +1275,11 @@ function App() {
                   setQuotedMessage(message);
                   setQuotedText(text);
                 }}
+                onEdit={openCodeEditor}
                 onRegenerate={() => handleRegenerate(message)}
+                onPreview={openArtifactPreview}
+                onRun={handleRunWorkflow}
+                onRestoreVersion={handleRestoreArtifactVersion}
                 regenerating={isSending}
                 onToast={setToast}
               />
@@ -1339,7 +1407,14 @@ function App() {
           onClosePreview={() => setPreviewArtifact(null)}
           onToast={setToast}
           agentDraft={agentDraft}
+          agentEditorDraft={agentEditorDraft}
+          editingAgentId={editingAgentId}
+          models={models}
+          onDeleteAgent={handleDeleteAgent}
           setAgentDraft={setAgentDraft}
+          setAgentEditorDraft={setAgentEditorDraft}
+          onEditAgent={beginEditAgent}
+          onSaveAgent={handleSaveAgent}
           pinnedMessages={pinnedMessages}
           memories={activeDetail.memories}
           onDeleteMemory={handleDeleteMemory}
@@ -1365,6 +1440,13 @@ function App() {
               <button type="button" onClick={() => navigator.clipboard.writeText(editDraft).then(() => setToast(labels.copied))}>{labels.copy}</button>
               <button type="button" onClick={handleSaveArtifact}>{labels.save}</button>
             </footer>
+          </div>
+        </div>
+      ) : null}
+      {previewArtifact ? (
+        <div className="preview-modal preview-modal--fullscreen" role="dialog" aria-modal="true">
+          <div className="preview-card preview-card--fullscreen">
+            <ArtifactPreviewPanel artifact={previewArtifact} labels={labels} onClose={() => setPreviewArtifact(null)} />
           </div>
         </div>
       ) : null}
@@ -1430,24 +1512,36 @@ function App() {
 
 function MessageCard({
   attachmentMap,
+  artifactMap,
   labels: t,
   message,
+  onApply,
   onExtractMemory,
+  onEdit,
   onPin,
   onQuote,
   onQuoteSelected,
   onRegenerate,
+  onPreview,
+  onRestoreVersion,
+  onRun,
   regenerating,
   onToast,
 }: {
   attachmentMap: Map<string, Attachment>;
+  artifactMap: Map<string, Artifact>;
   labels: typeof labels;
   message: ChatMessage;
+  onApply: (artifact: Artifact) => void;
   onExtractMemory: () => void;
+  onEdit: (artifact: Artifact) => void;
   onPin: () => void;
   onQuote: () => void;
   onQuoteSelected: (text: string) => void;
   onRegenerate: () => void;
+  onPreview: (artifact: Artifact) => void;
+  onRestoreVersion: (artifact: Artifact, versionId: string) => void;
+  onRun: (artifact: Artifact) => void;
   regenerating: boolean;
   onToast: (message: string) => void;
 }) {
@@ -1486,6 +1580,19 @@ function MessageCard({
         ) : null}
         <MarkdownMessage content={message.content} copyLabel={t.copy} copiedLabel={t.copied} onToast={onToast} />
         {messageAttachments.length ? <AttachmentList attachments={messageAttachments} /> : null}
+        {message.role === "agent" ? (
+          <InlineArtifactList
+            artifactIds={message.artifact_ids ?? []}
+            artifactMap={artifactMap}
+            labels={t}
+            onApply={onApply}
+            onEdit={onEdit}
+            onPreview={onPreview}
+            onRestoreVersion={onRestoreVersion}
+            onRun={onRun}
+            onToast={onToast}
+          />
+        ) : null}
         {message.role === "user" ? (
           <div className="message-regenerate-row">
             <button type="button" onClick={onRegenerate} disabled={regenerating}>
@@ -1494,6 +1601,190 @@ function MessageCard({
           </div>
         ) : null}
       </div>
+    </article>
+  );
+}
+
+function InlineArtifactList({
+  artifactIds,
+  artifactMap,
+  labels: t,
+  onApply,
+  onEdit,
+  onPreview,
+  onRestoreVersion,
+  onRun,
+  onToast,
+}: {
+  artifactIds: string[];
+  artifactMap: Map<string, Artifact>;
+  labels: typeof labels;
+  onApply: (artifact: Artifact) => void;
+  onEdit: (artifact: Artifact) => void;
+  onPreview: (artifact: Artifact) => void;
+  onRestoreVersion: (artifact: Artifact, versionId: string) => void;
+  onRun: (artifact: Artifact) => void;
+  onToast: (message: string) => void;
+}) {
+  const artifacts = artifactIds
+    .map((artifactId) => artifactMap.get(artifactId))
+    .filter((artifact): artifact is Artifact => Boolean(artifact));
+
+  if (!artifacts.length) {
+    return null;
+  }
+
+  return (
+    <div className="inline-artifact-list">
+      {artifacts.map((artifact) => (
+        <InlineArtifactCard
+          artifact={artifact}
+          key={artifact.id}
+          labels={t}
+          onApply={() => onApply(artifact)}
+          onEdit={() => onEdit(artifact)}
+          onPreview={() => onPreview(artifact)}
+          onRestoreVersion={(versionId) => onRestoreVersion(artifact, versionId)}
+          onRun={() => onRun(artifact)}
+          onToast={onToast}
+        />
+      ))}
+    </div>
+  );
+}
+
+function InlineArtifactCard({
+  artifact,
+  labels: t,
+  onApply,
+  onEdit,
+  onPreview,
+  onRestoreVersion,
+  onRun,
+  onToast,
+}: {
+  artifact: Artifact;
+  labels: typeof labels;
+  onApply: () => void;
+  onEdit: () => void;
+  onPreview: () => void;
+  onRestoreVersion: (versionId: string) => void;
+  onRun: () => void;
+  onToast: (message: string) => void;
+}) {
+  const [diff, setDiff] = useState<StructuredDiff | null>(null);
+  const [versions, setVersions] = useState<ArtifactVersion[]>([]);
+  const showPreviewButton = artifact.type === "code" || artifact.type === "workflow" || Boolean(artifact.preview_url);
+
+  async function handleCopy() {
+    await navigator.clipboard.writeText(artifact.content ?? artifact.preview_url ?? "");
+    onToast(t.copied);
+  }
+
+  async function handleToggleDiff() {
+    if (diff) {
+      setDiff(null);
+      return;
+    }
+    setDiff(await getArtifactDiff(artifact.id));
+  }
+
+  async function handleToggleVersions() {
+    if (versions.length) {
+      setVersions([]);
+      return;
+    }
+    setVersions(await getArtifactVersions(artifact.id));
+  }
+
+  return (
+    <article className={`inline-artifact ${artifact.type}`}>
+      <header>
+        <div>
+          <span>{artifact.type}</span>
+          <strong>{artifact.title}</strong>
+        </div>
+        <div className="inline-artifact-meta">
+          {artifact.render_mode ? <small>{artifact.render_mode}</small> : null}
+          {artifact.source_artifact_id ? <small>derived from {artifact.source_artifact_id}</small> : null}
+        </div>
+      </header>
+      {artifact.type === "code" ? (
+        <pre><code>{artifact.content ?? ""}</code></pre>
+      ) : null}
+      {artifact.type === "preview" ? (
+        <div className="inline-artifact-body">
+          <p>{artifact.content ?? "Preview artifact."}</p>
+          {artifact.preview_url ? (
+            <button type="button" onClick={onPreview}>{t.preview}</button>
+          ) : null}
+        </div>
+      ) : null}
+      {artifact.type === "deployment" ? (
+        <div className="inline-artifact-body">
+          <p>{artifact.logs ?? artifact.content}</p>
+          {artifact.preview_url ? <a href={`${API_ORIGIN}${artifact.preview_url}`} target="_blank" rel="noreferrer">{t.deployOpen}</a> : null}
+        </div>
+      ) : null}
+      {artifact.type === "workflow" ? (
+        <div className="inline-artifact-body">
+          <p>{artifact.content ? "Workflow definition ready to run." : "Workflow artifact."}</p>
+          <div className="inline-actions">
+            <button type="button" onClick={onRun}>{t.runWorkflow}</button>
+            {artifact.content ? <button type="button" onClick={onEdit}>{t.edit}</button> : null}
+          </div>
+        </div>
+      ) : null}
+      {artifact.type === "diff" ? (
+        <div className="inline-artifact-body">
+          {diff ? <DiffViewer diff={diff} /> : <pre><code>{artifact.content ?? ""}</code></pre>}
+          <div className="inline-actions">
+            <button type="button" onClick={handleToggleDiff}>{diff ? t.close : t.viewDiff}</button>
+            <button type="button" onClick={onApply} disabled={artifact.status === "applied"}>{artifact.status === "applied" ? t.applied : t.applyDiff}</button>
+          </div>
+        </div>
+      ) : null}
+      {artifact.type === "conflict" ? (
+        <div className="inline-artifact-body">
+          <p>{artifact.content}</p>
+          {artifact.conflict_candidates?.length ? (
+            <div className="conflict-candidate-list">
+              {artifact.conflict_candidates.map((candidate) => (
+                <article key={candidate.artifact_id}>
+                  <strong>{candidate.title}</strong>
+                  <small>{candidate.producer_agent_id}</small>
+                  <pre><code>{candidate.content_preview}</code></pre>
+                </article>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {(artifact.type === "document_preview" || artifact.type === "presentation_preview") ? (
+        <div className="inline-artifact-body">
+          <p>{artifact.content}</p>
+          {artifact.preview_url ? <a href={`${API_ORIGIN}${artifact.preview_url}`} target="_blank" rel="noreferrer">{t.preview}</a> : null}
+        </div>
+      ) : null}
+      {artifact.content && artifact.type !== "code" ? (
+        <small className="artifact-meta">
+          {artifact.language ?? artifact.type} 路 {artifact.file_path ?? artifact.id}
+        </small>
+      ) : null}
+      {versions.length ? (
+        <div className="inline-version-list">
+          {versions.map((version) => (
+            <button key={version.id} type="button" onClick={() => onRestoreVersion(version.id)}>
+              {t.restore} {version.reason}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <footer>
+        {artifact.content ? <button type="button" onClick={handleCopy}>{t.copy}</button> : null}
+        {artifact.content ? <button type="button" onClick={handleToggleVersions}>{t.versions}</button> : null}
+        {showPreviewButton ? <button type="button" onClick={onPreview}>{t.preview}</button> : null}
+      </footer>
     </article>
   );
 }
@@ -1640,6 +1931,7 @@ function ProgressPanel({ steps }: { steps: ProgressStep[] }) {
 function RightPanelContent({
   activeConversation,
   agentDraft,
+  agentEditorDraft,
   agents,
   artifacts,
   attachments,
@@ -1648,21 +1940,28 @@ function RightPanelContent({
   onApply,
   onClosePreview,
   onCreateAgent,
+  onDeleteAgent,
   onDeleteMemory,
+  onEditAgent,
   onEdit,
   onPreview,
   onRun,
   onRestoreVersion,
+  onSaveAgent,
   onToast,
   pinnedMessages,
   previewArtifact,
   selectedAgentIds,
   tab,
+  editingAgentId,
+  models,
   tools,
   setAgentDraft,
+  setAgentEditorDraft,
 }: {
   activeConversation?: Conversation;
   agentDraft: AgentCreateInput;
+  agentEditorDraft: AgentCreateInput | null;
   agents: Agent[];
   artifacts: Artifact[];
   attachments: Attachment[];
@@ -1671,18 +1970,24 @@ function RightPanelContent({
   onApply: (artifact: Artifact) => void;
   onClosePreview: () => void;
   onCreateAgent: (event: FormEvent) => void;
+  onDeleteAgent: (agent: Agent) => void;
   onDeleteMemory: (memoryId: string) => void;
+  onEditAgent: (agent: Agent) => void;
   onEdit: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
   onRun: (artifact: Artifact) => void;
   onRestoreVersion: (artifact: Artifact, versionId: string) => void;
+  onSaveAgent: (event: FormEvent) => void;
   onToast: (message: string) => void;
   pinnedMessages: ChatMessage[];
   previewArtifact: Artifact | null;
   selectedAgentIds: string[];
   tab: RightPanelTab;
+  editingAgentId: string;
+  models: ModelOption[];
   tools: ToolOption[];
   setAgentDraft: Dispatch<SetStateAction<AgentCreateInput>>;
+  setAgentEditorDraft: Dispatch<SetStateAction<AgentCreateInput | null>>;
 }) {
   if (tab === "agents") {
     const selected = agents;
@@ -1721,6 +2026,34 @@ function RightPanelContent({
             />
           </label>
           <span className="agent-form-label">可用工具（Available tools）</span>
+          <label className="agent-form-field">
+            <span>Avatar</span>
+            <input
+              value={agentDraft.avatar ?? ""}
+              onChange={(event) => setAgentDraft((current) => ({ ...current, avatar: event.target.value }))}
+              placeholder="AG"
+            />
+          </label>
+          <label className="agent-form-field">
+            <span>Model provider</span>
+            <select
+              value={agentDraft.model_provider ?? "auto"}
+              onChange={(event) => setAgentDraft((current) => ({ ...current, model_provider: event.target.value || undefined }))}
+            >
+              <option value="auto">Auto</option>
+              {models.map((model) => (
+                <option key={model.id} value={model.id}>{model.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="agent-form-field">
+            <span>Model name</span>
+            <input
+              value={agentDraft.model_name ?? ""}
+              onChange={(event) => setAgentDraft((current) => ({ ...current, model_name: event.target.value }))}
+              placeholder="Optional model override"
+            />
+          </label>
           <div className="agent-picker">
             {tools.map((tool) => (
               <label className="tool-choice" key={tool.id}>
@@ -1748,6 +2081,82 @@ function RightPanelContent({
           </div>
           <button type="submit">创建智能体（Agent）</button>
         </form>
+        {editingAgentId && agentEditorDraft ? (
+          <form className="side-card agent-create-form" onSubmit={onSaveAgent}>
+            <div className="agent-form-title">
+              <AvatarBadge value={agentEditorDraft.avatar ?? editingAgentId} className="agent-form-avatar" />
+              <div>
+                <strong>Edit Agent</strong>
+                <small>Update the selected custom agent.</small>
+              </div>
+            </div>
+            <label className="agent-form-field">
+              <span>Name</span>
+              <input
+                value={agentEditorDraft.name ?? ""}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), name: event.target.value }))}
+              />
+            </label>
+            <label className="agent-form-field">
+              <span>Description</span>
+              <input
+                value={agentEditorDraft.description ?? ""}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), description: event.target.value }))}
+              />
+            </label>
+            <label className="agent-form-field">
+              <span>System Prompt</span>
+              <textarea
+                value={agentEditorDraft.system_prompt ?? ""}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), system_prompt: event.target.value }))}
+              />
+            </label>
+            <label className="agent-form-field">
+              <span>Avatar</span>
+              <input
+                value={agentEditorDraft.avatar ?? ""}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), avatar: event.target.value }))}
+              />
+            </label>
+            <label className="agent-form-field">
+              <span>Model provider</span>
+              <select
+                value={agentEditorDraft.model_provider ?? "auto"}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), model_provider: event.target.value || undefined }))}
+              >
+                <option value="auto">Auto</option>
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>{model.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="agent-form-field">
+              <span>Model name</span>
+              <input
+                value={agentEditorDraft.model_name ?? ""}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), model_name: event.target.value }))}
+              />
+            </label>
+            <label className="agent-form-field">
+              <span>Capabilities</span>
+              <input
+                value={(agentEditorDraft.capabilities ?? []).join(", ")}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), capabilities: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) }))}
+              />
+            </label>
+            <label className="agent-form-field">
+              <span>Tools</span>
+              <input
+                value={(agentEditorDraft.tools ?? []).join(", ")}
+                onChange={(event) => setAgentEditorDraft((current) => ({ ...(current ?? {}), tools: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) }))}
+              />
+            </label>
+            <div className="inline-actions">
+              <button type="submit">Save</button>
+              <button type="button" onClick={() => setAgentEditorDraft(null)}>Cancel</button>
+            </div>
+          </form>
+        ) : null}
         {selected.map((agent) => (
           <section className="side-card agent-side-card" key={agent.id}>
             <div className="agent-side-header">
@@ -1758,6 +2167,12 @@ function RightPanelContent({
               </div>
             </div>
             <p>{agent.description}</p>
+            {agent.is_custom ? (
+              <div className="inline-actions">
+                <button type="button" onClick={() => onEditAgent(agent)}>Edit</button>
+                <button type="button" onClick={() => onDeleteAgent(agent)}>Delete</button>
+              </div>
+            ) : null}
             <TagRow items={agent.capabilities ?? []} />
             {agent.system_prompt ? <small>Prompt: {agent.system_prompt.slice(0, 120)}</small> : null}
             <small>Model: {agent.model_provider ?? "conversation model"}</small>
@@ -1811,9 +2226,6 @@ function RightPanelContent({
 
   return (
     <div className="right-content">
-      {previewArtifact ? (
-        <ArtifactPreviewPanel artifact={previewArtifact} labels={t} onClose={onClosePreview} />
-      ) : null}
       {artifacts.length === 0 ? (
         <section className="side-card"><p>{t.noArtifacts}</p></section>
       ) : (
@@ -1906,6 +2318,22 @@ function ArtifactCard({
             <span>{workflow?.nodes.length ?? 0} 个节点</span>
             <span>{workflow ? workflowNodeKinds(workflow.nodes).join(" / ") : "JSON"}</span>
           </div>
+        </div>
+      ) : null}
+      {artifact.type === "conflict" ? (
+        <div className="conflict-card">
+          <p>{artifact.content}</p>
+          {artifact.conflict_candidates?.length ? (
+            <div className="conflict-candidate-list">
+              {artifact.conflict_candidates.map((candidate) => (
+                <article key={candidate.artifact_id}>
+                  <strong>{candidate.title}</strong>
+                  <small>{candidate.producer_agent_id}</small>
+                  <pre><code>{candidate.content_preview}</code></pre>
+                </article>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {artifact.content && artifact.type !== "deployment" && artifact.type !== "document_preview" && artifact.type !== "presentation_preview" ? (
@@ -2176,27 +2604,81 @@ function MarkdownMessage({
 }
 
 function DiffViewer({ diff }: { diff: StructuredDiff }) {
+  const [reviewedHunks, setReviewedHunks] = useState<Set<string>>(new Set());
+
+  function toggleHunkReview(hunkKey: string) {
+    setReviewedHunks((current) => {
+      const next = new Set(current);
+      if (next.has(hunkKey)) {
+        next.delete(hunkKey);
+      } else {
+        next.add(hunkKey);
+      }
+      return next;
+    });
+  }
+
   return (
-    <div className="diff-viewer">
+    <div className="diff-viewer split">
       {diff.files.map((file) => (
         <section key={`${file.old_path}-${file.new_path}`}>
-          <strong>{file.new_path}</strong>
-          {file.hunks.map((hunk) => (
-            <div className="diff-hunk" key={hunk.header}>
-              <small>{hunk.header}</small>
-              {hunk.lines.map((line, index) => (
-                <div className={`diff-line ${line.type}`} key={`${hunk.header}-${index}`}>
-                  <span>{line.old_no ?? ""}</span>
-                  <span>{line.new_no ?? ""}</span>
-                  <code>{line.type === "add" ? "+" : line.type === "remove" ? "-" : " "}{line.content}</code>
+          <header>
+            <strong>{file.old_path}</strong>
+            <strong>{file.new_path}</strong>
+          </header>
+          {file.hunks.map((hunk) => {
+            const hunkKey = `${file.old_path}-${file.new_path}-${hunk.header}`;
+            const reviewed = reviewedHunks.has(hunkKey);
+            return (
+            <div className={`diff-hunk ${reviewed ? "reviewed" : ""}`} key={hunk.header}>
+              <div className="diff-hunk-header">
+                <small>{hunk.header}</small>
+                <button type="button" onClick={() => toggleHunkReview(hunkKey)}>
+                  {reviewed ? "Reviewed" : "Confirm hunk"}
+                </button>
+              </div>
+              {splitDiffRows(hunk.lines).map((row, index) => (
+                <div className="diff-split-row" key={`${hunk.header}-${index}`}>
+                  <div className={`diff-split-cell ${row.old?.type ?? "empty"}`}>
+                    <span>{row.old?.old_no ?? ""}</span>
+                    <code>{row.old ? `${row.old.type === "remove" ? "-" : " "}${row.old.content}` : ""}</code>
+                  </div>
+                  <div className={`diff-split-cell ${row.next?.type ?? "empty"}`}>
+                    <span>{row.next?.new_no ?? ""}</span>
+                    <code>{row.next ? `${row.next.type === "add" ? "+" : " "}${row.next.content}` : ""}</code>
+                  </div>
                 </div>
               ))}
             </div>
-          ))}
+          );
+          })}
         </section>
       ))}
     </div>
   );
+}
+
+function splitDiffRows(lines: StructuredDiffLine[]): Array<{ old?: StructuredDiffLine; next?: StructuredDiffLine }> {
+  const rows: Array<{ old?: StructuredDiffLine; next?: StructuredDiffLine }> = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const nextLine = lines[index + 1];
+    if (line.type === "remove" && nextLine?.type === "add") {
+      rows.push({ old: line, next: nextLine });
+      index += 2;
+      continue;
+    }
+    if (line.type === "remove") {
+      rows.push({ old: line });
+    } else if (line.type === "add") {
+      rows.push({ next: line });
+    } else {
+      rows.push({ old: line, next: line });
+    }
+    index += 1;
+  }
+  return rows;
 }
 
 type MarkdownBlock =
@@ -2624,19 +3106,25 @@ function toolLabel(key: keyof ToolPreferences): string {
 }
 
 function latestVisibleArtifacts(artifacts: Artifact[]): Artifact[] {
-  const latestWorkflow = [...artifacts].reverse().find((artifact) => artifact.type === "workflow");
-  const latestPrimaryArtifact = [...artifacts].reverse().find((artifact) => (
-    artifact.type === "code"
-    || artifact.type === "preview"
-    || artifact.type === "deployment"
-    || artifact.type === "document_preview"
-    || artifact.type === "presentation_preview"
-    || artifact.type === "diff"
-    || artifact.type === "conflict"
-  ));
-  const selected = [latestWorkflow, latestPrimaryArtifact].filter(Boolean) as Artifact[];
-  const uniqueIds = new Set(selected.map((artifact) => artifact.id));
-  const visible = artifacts.filter((artifact) => uniqueIds.has(artifact.id));
+  const preferredTypes: Artifact["type"][] = [
+    "workflow",
+    "preview",
+    "code",
+    "diff",
+    "conflict",
+    "deployment",
+    "document_preview",
+    "presentation_preview",
+    "review",
+  ];
+  const selectedIds = new Set<string>();
+  for (const type of preferredTypes) {
+    const latest = [...artifacts].reverse().find((artifact) => artifact.type === type);
+    if (latest) {
+      selectedIds.add(latest.id);
+    }
+  }
+  const visible = artifacts.filter((artifact) => selectedIds.has(artifact.id));
   if (visible.length) {
     return visible;
   }

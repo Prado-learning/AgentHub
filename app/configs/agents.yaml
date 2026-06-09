@@ -87,3 +87,35 @@ agents:
     tools:
       - file_reader_tool
       - document_preview_tool
+  - id: claude_code
+    name: Claude Code
+    type: external_agent
+    adapter: claude_code
+    description: Runs a configured Claude Code CLI process through AgentHub.
+    capabilities:
+      - code
+      - refactor
+      - review
+      - diff
+    skills:
+      - skills/code_agent.md
+    tools:
+      - file_reader_tool
+      - code_review_tool
+      - preview_tool
+  - id: opencode
+    name: OpenCode
+    type: external_agent
+    adapter: opencode
+    description: Runs a configured OpenCode CLI process through AgentHub.
+    capabilities:
+      - code
+      - refactor
+      - review
+      - diff
+    skills:
+      - skills/code_agent.md
+    tools:
+      - file_reader_tool
+      - code_review_tool
+      - preview_tool
