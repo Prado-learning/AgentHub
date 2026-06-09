@@ -3,10 +3,19 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agenthub-demo"
+name = "agenthub-workspace"
 version = "0.1.0"
-description = "Day 1 AgentHub demo with React and FastAPI"
+description = "A Web-based multi-agent collaboration workspace built with FastAPI and React"
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["agent", "multi-agent", "llm", "fastapi", "react"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: FastAPI",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
@@ -19,6 +28,9 @@ dev = [
   "httpx>=0.27.0",
   "pytest>=8.3.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/Prado-learning/AgentHub"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
