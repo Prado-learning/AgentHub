@@ -8,6 +8,7 @@ from agenthub.tools.builtin.file_reader import file_reader_tool
 from agenthub.tools.builtin.image_reader import image_reader_tool
 from agenthub.tools.builtin.preview import preview_tool
 from agenthub.tools.builtin.ui_builder import ui_builder_tool
+from agenthub.tools.builtin.workflow_builder import workflow_builder_tool
 from agenthub.tools.registry import ToolRegistry
 from agenthub.tools.schemas import ToolResult
 
@@ -36,4 +37,5 @@ def build_default_tool_registry() -> ToolRegistry:
     registry.register("document_preview_tool", document_preview_tool)
     registry.register("file_reader_tool", file_reader_tool)
     registry.register("image_reader_tool", image_reader_tool)
+    registry.register("workflow_builder_tool", workflow_builder_tool)
     return registry

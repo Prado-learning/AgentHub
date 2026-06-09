@@ -23,6 +23,7 @@ import {
   regenerateChatMessage,
   restoreConversation,
   restoreArtifactVersion,
+  runWorkflowArtifact,
   sendChatMessage,
   trashConversation,
   unarchiveConversation,
@@ -153,6 +154,7 @@ const labels = {
   edit: "编辑",
   save: "保存",
   versions: "版本",
+  runWorkflow: "运行 Workflow",
   createAgent: "创建智能体（Agent）",
   systemPrompt: "System Prompt",
   selectedQuote: "引用选中",
@@ -847,6 +849,38 @@ function App() {
     }
   }
 
+  async function handleRunWorkflow(artifact: Artifact) {
+    if (!activeConversation || isSending) {
+      return;
+    }
+    const conversationId = activeConversation.id;
+    updateConversationRuntime(conversationId, {
+      isSending: true,
+      progressSteps: initialProgressSteps(selectedModelId, attachments.length),
+      thinkingStartedAt: Date.now(),
+    });
+    setError("");
+    try {
+      const response = await runWorkflowArtifact(artifact.id, selectedModelId);
+      applyChatResponse(conversationId, response);
+      setRightPanelOpen(true);
+      setRightTab("artifacts");
+      setToast("Workflow 已运行");
+      await reloadConversations(conversationId);
+    } catch (err) {
+      updateConversationRuntime(conversationId, (current) => ({
+        ...current,
+        progressSteps: markProgressError(
+          current.progressSteps,
+          err instanceof Error ? err.message : "Workflow run failed",
+        ),
+      }));
+      setError(err instanceof Error ? err.message : "Workflow run failed");
+    } finally {
+      updateConversationRuntime(conversationId, { isSending: false, thinkingStartedAt: null });
+    }
+  }
+
   async function handleCreateAgent(event: FormEvent) {
     event.preventDefault();
     if (!agentDraft.name?.trim()) {
@@ -887,7 +921,7 @@ function App() {
     });
     setArtifacts((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     setEditArtifact(updated);
-    setToast("代码已保存，版本已记录");
+    setToast("产物已保存，版本已记录");
   }
 
   async function handleRestoreArtifactVersion(artifact: Artifact, versionId: string) {
@@ -1058,7 +1092,13 @@ function App() {
                     <div className="conversation-title-row">
                       <strong>{conversation.title}</strong>
                       {runtimeByConversation[conversation.id]?.isSending ? <span>{labels.running}</span> : null}
-                      {conversation.is_pinned ? <span>{labels.pin}</span> : null}
+                      {conversation.is_pinned ? (
+                        <span
+                          aria-label={labels.pin}
+                          className="conversation-pin-indicator"
+                          title={labels.pin}
+                        />
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1104,7 +1144,11 @@ function App() {
 
         <section className="conversation-footer">
           <button className="trash-button" type="button" onClick={() => setIsTrashOpen((current) => !current)}>
-            {labels.trash}
+            <span
+              aria-hidden="true"
+              className="trash-button-icon"
+            />
+            <span className="trash-button-label">{labels.trash}</span>
             <strong>{trashedConversations.length}</strong>
           </button>
         </section>
@@ -1290,6 +1334,7 @@ function App() {
           onCreateAgent={handleCreateAgent}
           onEdit={openCodeEditor}
           onPreview={openArtifactPreview}
+          onRun={handleRunWorkflow}
           onRestoreVersion={handleRestoreArtifactVersion}
           onClosePreview={() => setPreviewArtifact(null)}
           onToast={setToast}
@@ -1606,6 +1651,7 @@ function RightPanelContent({
   onDeleteMemory,
   onEdit,
   onPreview,
+  onRun,
   onRestoreVersion,
   onToast,
   pinnedMessages,
@@ -1628,6 +1674,7 @@ function RightPanelContent({
   onDeleteMemory: (memoryId: string) => void;
   onEdit: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
+  onRun: (artifact: Artifact) => void;
   onRestoreVersion: (artifact: Artifact, versionId: string) => void;
   onToast: (message: string) => void;
   pinnedMessages: ChatMessage[];
@@ -1778,6 +1825,7 @@ function RightPanelContent({
             onApply={() => onApply(artifact)}
             onEdit={() => onEdit(artifact)}
             onPreview={() => onPreview(artifact)}
+            onRun={() => onRun(artifact)}
             onRestoreVersion={(versionId) => onRestoreVersion(artifact, versionId)}
             onToast={onToast}
           />
@@ -1793,6 +1841,7 @@ function ArtifactCard({
   onApply,
   onEdit,
   onPreview,
+  onRun,
   onRestoreVersion,
   onToast,
 }: {
@@ -1801,12 +1850,14 @@ function ArtifactCard({
   onApply: () => void;
   onEdit: () => void;
   onPreview: () => void;
+  onRun: () => void;
   onRestoreVersion: (versionId: string) => void;
   onToast: (message: string) => void;
 }) {
   const [diff, setDiff] = useState<StructuredDiff | null>(null);
   const [versions, setVersions] = useState<ArtifactVersion[]>([]);
-  const showPreviewButton = artifact.type === "code" || Boolean(artifact.preview_url);
+  const workflow = artifact.type === "workflow" ? parseWorkflowArtifact(artifact) : null;
+  const showPreviewButton = artifact.type === "code" || artifact.type === "workflow" || Boolean(artifact.preview_url);
 
   async function handleCopy() {
     await navigator.clipboard.writeText(artifact.content ?? artifact.preview_url ?? "");
@@ -1848,6 +1899,15 @@ function ArtifactCard({
           {artifact.preview_url ? <a href={`${API_ORIGIN}${artifact.preview_url}`} target="_blank" rel="noreferrer">{t.preview}</a> : null}
         </div>
       ) : null}
+      {artifact.type === "workflow" ? (
+        <div className="workflow-card">
+          <p>{workflow?.description ?? "Editable workflow definition."}</p>
+          <div className="workflow-stats">
+            <span>{workflow?.nodes.length ?? 0} 个节点</span>
+            <span>{workflow ? workflowNodeKinds(workflow.nodes).join(" / ") : "JSON"}</span>
+          </div>
+        </div>
+      ) : null}
       {artifact.content && artifact.type !== "deployment" && artifact.type !== "document_preview" && artifact.type !== "presentation_preview" ? (
         <small className="artifact-meta">
           {artifact.language ?? artifact.type} · {artifact.file_path ?? artifact.id}
@@ -1865,10 +1925,11 @@ function ArtifactCard({
       ) : null}
       <footer>
         {artifact.content ? <button type="button" onClick={handleCopy}>{t.copy}</button> : null}
-        {artifact.type === "code" ? <button type="button" onClick={onEdit}>{t.edit}</button> : null}
+        {artifact.type === "code" || artifact.type === "workflow" ? <button type="button" onClick={onEdit}>{t.edit}</button> : null}
         {artifact.content ? <button type="button" onClick={handleToggleVersions}>{t.versions}</button> : null}
         {artifact.type === "diff" ? <button type="button" onClick={handleToggleDiff}>{t.viewDiff}</button> : null}
         {showPreviewButton ? <button type="button" onClick={onPreview}>{t.preview}</button> : null}
+        {artifact.type === "workflow" ? <button type="button" onClick={onRun}>{t.runWorkflow}</button> : null}
         {artifact.type === "diff" ? (
           <button disabled={artifact.status === "applied"} type="button" onClick={onApply}>
             {artifact.status === "applied" ? t.applied : t.applyDiff}
@@ -1900,7 +1961,9 @@ function ArtifactPreviewPanel({
         </div>
         <button type="button" onClick={onClose}>{t.close}</button>
       </header>
-      {inlineHtml ? (
+      {artifact.type === "workflow" ? (
+        <WorkflowPreview artifact={artifact} />
+      ) : inlineHtml ? (
         <iframe
           title={`${artifact.title} preview`}
           sandbox="allow-forms allow-modals allow-scripts"
@@ -1915,6 +1978,53 @@ function ArtifactPreviewPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function WorkflowPreview({ artifact }: { artifact: Artifact }) {
+  const workflow = parseWorkflowArtifact(artifact);
+  if (!workflow) {
+    return (
+      <div className="artifact-preview-empty">
+        <strong>Workflow JSON 无法解析</strong>
+        <p>请先修复这个 workflow artifact 的 JSON 内容，再重新预览或运行。</p>
+      </div>
+    );
+  }
+  return (
+    <div className="workflow-preview">
+      <section className="workflow-summary">
+        <strong>{workflow.title}</strong>
+        <p>{workflow.description || "Editable workflow definition."}</p>
+        <div className="workflow-stats">
+          <span>{workflow.nodes.length} 个节点</span>
+          <span>版本 {workflow.version}</span>
+          <span>{workflow.kind}</span>
+        </div>
+      </section>
+      <section className="workflow-node-list">
+        {workflow.nodes.map((node) => (
+          <article className="workflow-node" key={node.id}>
+            <header>
+              <strong>{node.label || node.id}</strong>
+              <span>{node.type}</span>
+            </header>
+            <p>{node.task || node.prompt || "No task configured."}</p>
+            <small>
+              {node.type === "tool"
+                ? `Tool: ${node.tool_id || "unknown"}`
+                : `Agent: ${node.agent_id || "orchestrator"}`}
+            </small>
+            {node.depends_on.length ? (
+              <small>Depends on: {node.depends_on.join(", ")}</small>
+            ) : (
+              <small>Depends on: none</small>
+            )}
+            {node.tools.length ? <small>Tools: {node.tools.join(", ")}</small> : null}
+          </article>
+        ))}
+      </section>
+    </div>
   );
 }
 
@@ -1957,6 +2067,87 @@ function extractHtmlFence(content: string): string {
     }
   }
   return "";
+}
+
+type WorkflowNode = {
+  id: string;
+  type: string;
+  label?: string;
+  agent_id?: string;
+  tool_id?: string;
+  task?: string;
+  prompt?: string;
+  tools: string[];
+  depends_on: string[];
+};
+
+type WorkflowDefinition = {
+  version: number;
+  kind: string;
+  title: string;
+  description?: string;
+  source_prompt?: string;
+  nodes: WorkflowNode[];
+};
+
+function parseWorkflowArtifact(artifact: Artifact): WorkflowDefinition | null {
+  if (artifact.type !== "workflow" || !artifact.content) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(stripJsonFence(artifact.content)) as Record<string, unknown>;
+    const nodes = Array.isArray(parsed.nodes)
+      ? parsed.nodes.map((node) => normalizeWorkflowNode(node)).filter(Boolean) as WorkflowNode[]
+      : [];
+    return {
+      version: Number(parsed.version ?? 1),
+      kind: String(parsed.kind ?? "agenthub.workflow"),
+      title: String(parsed.title ?? artifact.title),
+      description: parsed.description ? String(parsed.description) : undefined,
+      source_prompt: parsed.source_prompt ? String(parsed.source_prompt) : undefined,
+      nodes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeWorkflowNode(node: unknown): WorkflowNode | null {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+  const value = node as Record<string, unknown>;
+  const id = String(value.id ?? "").trim();
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    type: String(value.type ?? "agent"),
+    label: value.label ? String(value.label) : undefined,
+    agent_id: value.agent_id ? String(value.agent_id) : undefined,
+    tool_id: value.tool_id ? String(value.tool_id) : undefined,
+    task: value.task ? String(value.task) : undefined,
+    prompt: value.prompt ? String(value.prompt) : undefined,
+    tools: toStringList(value.tools),
+    depends_on: toStringList(value.depends_on),
+  };
+}
+
+function stripJsonFence(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("```")) {
+    return trimmed;
+  }
+  return trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function workflowNodeKinds(nodes: WorkflowNode[]): string[] {
+  const unique = new Set(nodes.map((node) => node.type).filter(Boolean));
+  return [...unique];
 }
 
 function MarkdownMessage({
@@ -2031,14 +2222,214 @@ function parseMarkdownBlocks(content: string): MarkdownBlock[] {
 }
 
 function renderTextBlock(content: string, key: number): ReactNode {
-  const paragraphs = content.split(/\n{2,}/).map((paragraph) => paragraph.trim()).filter(Boolean);
-  return paragraphs.map((paragraph, index) => (
-    <p key={`text-${key}-${index}`}>
-      {paragraph.split("\n").map((line, lineIndex, lines) => (
-        <span key={`${line}-${lineIndex}`}>{line}{lineIndex < lines.length - 1 ? <br /> : null}</span>
-      ))}
-    </p>
-  ));
+  const lines = content.split("\n");
+  const nodes: ReactNode[] = [];
+  let paragraphLines: string[] = [];
+  let listType: "ul" | "ol" | null = null;
+  let listItems: string[] = [];
+
+  const flushParagraph = () => {
+    if (!paragraphLines.length) {
+      return;
+    }
+    const paragraph = paragraphLines.join(" ").trim();
+    if (paragraph) {
+      nodes.push(
+        <p key={`text-${key}-p-${nodes.length}`}>
+          {renderInlineMarkdown(paragraph, `text-${key}-p-${nodes.length}`)}
+        </p>,
+      );
+    }
+    paragraphLines = [];
+  };
+
+  const flushList = () => {
+    if (!listType || !listItems.length) {
+      listType = null;
+      listItems = [];
+      return;
+    }
+    const listKey = `text-${key}-${listType}-${nodes.length}`;
+    const items = listItems.map((item, index) => (
+      <li key={`${listKey}-${index}`}>
+        {renderInlineMarkdown(item, `${listKey}-${index}`)}
+      </li>
+    ));
+    nodes.push(listType === "ul" ? <ul key={listKey}>{items}</ul> : <ol key={listKey}>{items}</ol>);
+    listType = null;
+    listItems = [];
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(4, headingMatch[1].length);
+      const title = headingMatch[2].trim();
+      if (level === 1) {
+        nodes.push(<h1 key={`text-${key}-h1-${nodes.length}`}>{renderInlineMarkdown(title, `text-${key}-h1-${nodes.length}`)}</h1>);
+      } else if (level === 2) {
+        nodes.push(<h2 key={`text-${key}-h2-${nodes.length}`}>{renderInlineMarkdown(title, `text-${key}-h2-${nodes.length}`)}</h2>);
+      } else if (level === 3) {
+        nodes.push(<h3 key={`text-${key}-h3-${nodes.length}`}>{renderInlineMarkdown(title, `text-${key}-h3-${nodes.length}`)}</h3>);
+      } else {
+        nodes.push(<h4 key={`text-${key}-h4-${nodes.length}`}>{renderInlineMarkdown(title, `text-${key}-h4-${nodes.length}`)}</h4>);
+      }
+      continue;
+    }
+
+    if (/^(?:[-*_]\s*){3,}$/.test(trimmed)) {
+      flushParagraph();
+      flushList();
+      nodes.push(<hr key={`text-${key}-hr-${nodes.length}`} />);
+      continue;
+    }
+
+    const quoteMatch = trimmed.match(/^>\s?(.*)$/);
+    if (quoteMatch) {
+      flushParagraph();
+      flushList();
+      nodes.push(
+        <blockquote key={`text-${key}-quote-${nodes.length}`}>
+          {renderInlineMarkdown(quoteMatch[1], `text-${key}-quote-${nodes.length}`)}
+        </blockquote>,
+      );
+      continue;
+    }
+
+    const unorderedMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+    if (unorderedMatch) {
+      flushParagraph();
+      if (listType && listType !== "ul") {
+        flushList();
+      }
+      listType = "ul";
+      listItems.push(unorderedMatch[1].trim());
+      continue;
+    }
+
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (orderedMatch) {
+      flushParagraph();
+      if (listType && listType !== "ol") {
+        flushList();
+      }
+      listType = "ol";
+      listItems.push(orderedMatch[1].trim());
+      continue;
+    }
+
+    flushList();
+    paragraphLines.push(trimmed);
+  }
+
+  flushParagraph();
+  flushList();
+
+  return nodes.length ? nodes : <p key={`text-${key}-empty`}>{content}</p>;
+}
+
+function renderInlineMarkdown(content: string, keyPrefix: string): ReactNode[] {
+  const match = findNextInlineMarkdown(content);
+  if (!match) {
+    return [content];
+  }
+
+  const before = content.slice(0, match.index);
+  const after = content.slice(match.index + match.raw.length);
+  const nodes: ReactNode[] = [];
+
+  if (before) {
+    nodes.push(before);
+  }
+
+  if (match.kind === "link") {
+    nodes.push(
+      <a href={match.value} key={`${keyPrefix}-link-${match.index}`} rel="noreferrer" target="_blank">
+        {renderInlineMarkdown(match.label, `${keyPrefix}-link-${match.index}`)}
+      </a>,
+    );
+  }
+  if (match.kind === "code") {
+    nodes.push(<code key={`${keyPrefix}-code-${match.index}`}>{match.value}</code>);
+  }
+  if (match.kind === "strong_em") {
+    nodes.push(
+      <strong key={`${keyPrefix}-strong-em-${match.index}`}>
+        <em>{renderInlineMarkdown(match.value, `${keyPrefix}-strong-em-${match.index}`)}</em>
+      </strong>,
+    );
+  }
+  if (match.kind === "strong") {
+    nodes.push(
+      <strong key={`${keyPrefix}-strong-${match.index}`}>
+        {renderInlineMarkdown(match.value, `${keyPrefix}-strong-${match.index}`)}
+      </strong>,
+    );
+  }
+  if (match.kind === "em") {
+    nodes.push(
+      <em key={`${keyPrefix}-em-${match.index}`}>
+        {renderInlineMarkdown(match.value, `${keyPrefix}-em-${match.index}`)}
+      </em>,
+    );
+  }
+
+  if (after) {
+    nodes.push(...renderInlineMarkdown(after, `${keyPrefix}-tail-${match.index}`));
+  }
+
+  return nodes;
+}
+
+function findNextInlineMarkdown(content: string): {
+  index: number;
+  raw: string;
+  kind: "link" | "code" | "strong_em" | "strong" | "em";
+  label: string;
+  value: string;
+} | null {
+  const patterns = [
+    { kind: "link" as const, regex: /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/ },
+    { kind: "code" as const, regex: /`([^`]+)`/ },
+    { kind: "strong_em" as const, regex: /\*\*\*([^*]+)\*\*\*/ },
+    { kind: "strong" as const, regex: /\*\*([^*]+)\*\*/ },
+    { kind: "em" as const, regex: /\*([^*]+)\*/ },
+  ];
+
+  let bestMatch: {
+    index: number;
+    raw: string;
+    kind: "link" | "code" | "strong_em" | "strong" | "em";
+    label: string;
+    value: string;
+  } | null = null;
+
+  for (const pattern of patterns) {
+    const result = pattern.regex.exec(content);
+    if (!result) {
+      continue;
+    }
+    if (!bestMatch || result.index < bestMatch.index) {
+      bestMatch = {
+        index: result.index,
+        raw: result[0],
+        kind: pattern.kind,
+        label: result[1] ?? "",
+        value: pattern.kind === "link" ? (result[2] ?? "") : (result[1] ?? ""),
+      };
+    }
+  }
+
+  return bestMatch;
 }
 
 function CodeBlock({
@@ -2233,6 +2624,7 @@ function toolLabel(key: keyof ToolPreferences): string {
 }
 
 function latestVisibleArtifacts(artifacts: Artifact[]): Artifact[] {
+  const latestWorkflow = [...artifacts].reverse().find((artifact) => artifact.type === "workflow");
   const latestPrimaryArtifact = [...artifacts].reverse().find((artifact) => (
     artifact.type === "code"
     || artifact.type === "preview"
@@ -2242,7 +2634,13 @@ function latestVisibleArtifacts(artifacts: Artifact[]): Artifact[] {
     || artifact.type === "diff"
     || artifact.type === "conflict"
   ));
-  const latest = latestPrimaryArtifact ?? artifacts[artifacts.length - 1];
+  const selected = [latestWorkflow, latestPrimaryArtifact].filter(Boolean) as Artifact[];
+  const uniqueIds = new Set(selected.map((artifact) => artifact.id));
+  const visible = artifacts.filter((artifact) => uniqueIds.has(artifact.id));
+  if (visible.length) {
+    return visible;
+  }
+  const latest = artifacts[artifacts.length - 1];
   return latest ? [latest] : [];
 }
 
@@ -2473,6 +2871,7 @@ function displayToolName(toolId: string): string {
     document_preview_tool: "文档预览工具（document_preview_tool）",
     file_reader_tool: "文件读取工具（file_reader_tool）",
     image_reader_tool: "图片读取工具（image_reader_tool）",
+    workflow_builder_tool: "工作流生成工具（workflow_builder_tool）",
   };
   return names[normalized] ?? (toolId ? `${toolId}（Tool）` : "工具（Tool）");
 }

@@ -85,7 +85,8 @@ export type Artifact = {
     | "image"
     | "deployment"
     | "document_preview"
-    | "presentation_preview";
+    | "presentation_preview"
+    | "workflow";
   title: string;
   language?: string;
   content?: string;

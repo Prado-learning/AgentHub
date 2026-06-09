@@ -15,6 +15,7 @@ from app.api.services.diff_service import (
     get_structured_diff,
     rollback_diff_application,
 )
+from app.api.services.workflow_service import run_workflow_artifact
 
 
 router = APIRouter(tags=["artifacts"])
@@ -24,6 +25,11 @@ class ArtifactUpdateRequest(BaseModel):
     title: str | None = None
     content: str | None = None
     language: str | None = None
+
+
+class WorkflowRunRequest(BaseModel):
+    model_provider: str | None = None
+    model_name: str | None = None
 
 
 @router.get("/artifacts/{artifact_id}")
@@ -93,5 +99,20 @@ def rollback_artifact_diff(artifact_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Applied diff not found")
     try:
         return {"application": rollback_diff_application(str(artifact["apply_id"]))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/artifacts/{artifact_id}/run")
+def execute_workflow_artifact(
+    artifact_id: str,
+    request: WorkflowRunRequest,
+) -> dict:
+    try:
+        return run_workflow_artifact(
+            artifact_id,
+            model_provider=request.model_provider,
+            model_name=request.model_name,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

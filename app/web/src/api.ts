@@ -375,3 +375,17 @@ export async function restoreArtifactVersion(
 export async function getArtifactDiff(artifactId: string): Promise<StructuredDiff> {
   return request<StructuredDiff>(`/artifacts/${artifactId}/diff`);
 }
+
+export function runWorkflowArtifact(
+  artifactId: string,
+  modelProvider?: string,
+  modelName?: string,
+): Promise<ChatResponse> {
+  return request<ChatResponse>(`/artifacts/${artifactId}/run`, {
+    method: "POST",
+    body: JSON.stringify({
+      model_provider: modelProvider,
+      model_name: modelName,
+    }),
+  });
+}

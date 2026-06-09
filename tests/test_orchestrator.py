@@ -93,6 +93,22 @@ def test_single_vision_agent_keeps_default_image_tool() -> None:
     assert plan.steps[0].tools == ["image_reader_tool"]
 
 
+def test_orchestrator_routes_workflow_requests_to_workflow_builder() -> None:
+    plan = Orchestrator().plan(
+        RunContext(
+            conversation_id="conv_demo",
+            message="帮我创建一个网页生成 workflow",
+            history=[],
+            selected_agents=["codex"],
+            mode="single",
+        )
+    )
+
+    assert plan.reason == "workflow request"
+    assert [step.agent_id for step in plan.steps] == ["orchestrator"]
+    assert plan.steps[0].tools == ["workflow_builder_tool"]
+
+
 def test_orchestrator_explicit_multiple_agents_can_run_in_parallel() -> None:
     plan = Orchestrator().plan(
         RunContext(
@@ -153,4 +169,3 @@ def test_orchestrator_falls_back_when_llm_planner_returns_invalid_json() -> None
 
     assert plan.reason == "rule based auto dispatch"
     assert [step.agent_id for step in plan.steps] == ["ui_builder", "code_reviewer"]
-

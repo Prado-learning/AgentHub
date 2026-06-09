@@ -13,6 +13,8 @@ def tool_kwargs_for(
     latest_code = latest_code_content(artifacts)
     if tool_id == "ui_builder_tool":
         return {"prompt": step.task or context.message}
+    if tool_id == "workflow_builder_tool":
+        return {"prompt": step.task or context.message}
     if tool_id == "preview_tool":
         return {
             "title": "Generated Preview",
@@ -48,4 +50,3 @@ def latest_preview_html(artifacts: list[dict]) -> str:
         if artifact.get("type") == "preview":
             return str(artifact.get("preview_html", ""))
     return ""
-

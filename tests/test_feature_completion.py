@@ -9,7 +9,9 @@ from app.api.services import (
     artifact_service,
     attachment_service,
     conversation_service,
+    context_summary_service,
     diff_service,
+    memory_service,
 )
 from app.api.services.conversation_store import JsonStore
 from agenthub.tools.builtin import deploy as deploy_module
@@ -221,3 +223,84 @@ def test_partial_quote_regenerate_and_document_preview(tmp_path: Path, monkeypat
     ]
     assert any(message.get("is_active_generation") is False for message in agent_versions)
     assert max(message.get("generation_index") or 0 for message in agent_versions) >= 2
+
+
+def test_workflow_artifact_can_be_created_and_run(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_REAL_LLM", "false")
+    monkeypatch.setattr(
+        conversation_service,
+        "CONVERSATIONS",
+        JsonStore(tmp_path / "conversations.json"),
+    )
+    monkeypatch.setattr(
+        conversation_service,
+        "MESSAGES",
+        JsonStore(tmp_path / "messages.json"),
+    )
+    monkeypatch.setattr(
+        artifact_service,
+        "ARTIFACTS",
+        JsonStore(tmp_path / "artifacts.json"),
+    )
+    monkeypatch.setattr(
+        artifact_service,
+        "ARTIFACT_VERSIONS",
+        JsonStore(tmp_path / "artifact_versions.json"),
+    )
+    monkeypatch.setattr(
+        attachment_service,
+        "ATTACHMENTS",
+        JsonStore(tmp_path / "attachments.json"),
+    )
+    monkeypatch.setattr(
+        context_summary_service,
+        "SUMMARIES",
+        JsonStore(tmp_path / "summaries.json"),
+    )
+    monkeypatch.setattr(
+        memory_service,
+        "MEMORIES",
+        JsonStore(tmp_path / "memories.json"),
+    )
+    monkeypatch.setattr(artifact_service, "PREVIEW_DIR", tmp_path / "previews")
+
+    conversation = client.post(
+        "/conversations",
+        json={
+            "title": "Workflow Demo",
+            "mode": "single",
+            "agent_ids": ["orchestrator"],
+        },
+    ).json()["conversation"]
+
+    created = client.post(
+        "/chat",
+        json={
+            "conversation_id": conversation["id"],
+            "message": {
+                "role": "user",
+                "content": "帮我创建一个网页生成 workflow",
+                "format": "markdown",
+            },
+            "selected_agents": ["orchestrator"],
+            "agent_mode": "single",
+        },
+    )
+    assert created.status_code == 200
+    workflow = next(
+        artifact
+        for artifact in created.json()["artifacts"]
+        if artifact["type"] == "workflow"
+    )
+
+    run_response = client.post(
+        f"/artifacts/{workflow['id']}/run",
+        json={"model_provider": "auto"},
+    )
+    assert run_response.status_code == 200
+    data = run_response.json()
+    assert data["status"] in {"success", "partial_success"}
+    assert any(artifact["type"] == "workflow" for artifact in created.json()["artifacts"])
+    assert any(artifact["type"] == "code" for artifact in data["artifacts"])
+    assert any(artifact["type"] == "preview" for artifact in data["artifacts"])
+    assert any(event["type"] == "run.completed" for event in data["events"])

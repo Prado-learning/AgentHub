@@ -52,6 +52,20 @@ class Orchestrator:
         if mentions["agents"] or mentions["tools"]:
             return self._plan_explicit_mentions(message, mentions)
 
+        if "workflow_generation" in self._classify_intents(message):
+            return Plan(
+                steps=[
+                    self._build_step(
+                        "step_workflow_builder",
+                        "orchestrator",
+                        message,
+                        explicit_tools=["workflow_builder_tool"],
+                        can_run_parallel=False,
+                    )
+                ],
+                reason="workflow request",
+            )
+
         if context.mode == "single" and context.selected_agents:
             return Plan(
                 steps=[self._build_step("step_1", context.selected_agents[0], message)],
@@ -114,6 +128,18 @@ class Orchestrator:
             intents.discard("preview")
 
         steps: list[PlanStep] = []
+        if "workflow_generation" in intents:
+            steps.append(
+                self._build_step(
+                    "step_workflow_builder",
+                    "orchestrator",
+                    message,
+                    explicit_tools=["workflow_builder_tool"],
+                    can_run_parallel=False,
+                )
+            )
+            return [step for step in steps if step.agent_id in self.available_agent_ids]
+
         if "image_task" in intents:
             steps.append(
                 self._build_step(
@@ -382,6 +408,8 @@ class Orchestrator:
             intents.add("image_task")
         if self._contains_any(lowered, ["deploy", "部署", "发布"]):
             intents.add("deploy")
+        if self._contains_any(lowered, ["workflow", "pipeline", "flow", "工作流", "流程"]):
+            intents.add("workflow_generation")
         if "ui_generation" in intents and "code_review" not in intents:
             intents.add("code_review")
         return intents or {"text_answer"}

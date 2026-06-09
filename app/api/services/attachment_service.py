@@ -80,6 +80,17 @@ def list_attachments(conversation_id: str | None = None) -> list[dict]:
     return [_public_attachment(attachment) for attachment in records]
 
 
+def list_attachment_records(conversation_id: str | None = None) -> list[dict]:
+    records = ATTACHMENTS.read()
+    if conversation_id:
+        records = [
+            attachment
+            for attachment in records
+            if attachment.get("conversation_id") == conversation_id
+        ]
+    return records
+
+
 def get_attachment(attachment_id: str) -> dict | None:
     for attachment in ATTACHMENTS.read():
         if attachment.get("id") == attachment_id:
@@ -136,4 +147,3 @@ def _public_attachment(attachment: dict) -> dict:
         for key, value in attachment.items()
         if key != "file_path"
     }
-

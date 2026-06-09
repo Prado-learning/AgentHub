@@ -17,6 +17,7 @@ agents:
       - preview_tool
       - deploy_tool
       - ui_builder_tool
+      - workflow_builder_tool
   - id: codex
     name: Code Agent
     type: external_agent
