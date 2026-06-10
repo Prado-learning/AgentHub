@@ -134,12 +134,9 @@ IM 式会话管理、单聊 / 群聊协作、`@Agent` / `@Tool` 分派、文件�
 
 | 类型 | 地址 |
 | --- | --- |
-| 仓库地址 | `<GitHub 仓库链接>` |
-| 飞书协作文档 | `<飞书文档链接>` |
-| 演示地址 | `<AgentHub 本地或部署地址>` |
-| Workflow 产物示例 | `<workflow artifact 链接或截图>` |
-| 预览产物示例 | `<preview artifact 链接或截图>` |
-| Diff / Deployment 产物示例 | `<对应链接或截图>` |
+| 仓库地址 | `https://github.com/Prado-learning/AgentHub` |
+| 飞书协作文档 | `https://lcne8m1udqo5.feishu.cn/docx/Hov8dTWB1oigOUx21HIcsSrBnKe?from=from_copylink` |
+
 
 ---
 
