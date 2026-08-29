@@ -30,7 +30,6 @@ def get_or_update_summary(
         summary_text = provider.complete(_summary_prompt(history, previous))
     except Exception:
         return previous
-    records = [item for item in SUMMARIES.read() if item.get("conversation_id") != conversation_id]
     summary = {
         "conversation_id": conversation_id,
         "content": summary_text,
@@ -39,8 +38,14 @@ def get_or_update_summary(
         "message_count": len(history),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    records.append(summary)
-    SUMMARIES.write(records)
+
+    def _mutate(records: list[dict]) -> list[dict]:
+        return [
+            *[item for item in records if item.get("conversation_id") != conversation_id],
+            summary,
+        ]
+
+    SUMMARIES.update(_mutate)
     return summary
 
 

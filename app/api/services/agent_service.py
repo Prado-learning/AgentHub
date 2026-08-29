@@ -22,40 +22,56 @@ def get_custom_agent(agent_id: str) -> dict | None:
 
 
 def create_custom_agent(payload: dict) -> dict:
-    records = CUSTOM_AGENTS.read()
-    agent_id = _normalize_agent_id(payload.get("id") or payload.get("name") or "custom_agent")
-    existing_ids = {str(agent.get("id")) for agent in records}
-    base_id = agent_id
-    suffix = 2
-    while agent_id in existing_ids:
-        agent_id = f"{base_id}_{suffix}"
-        suffix += 1
+    base_id = _normalize_agent_id(payload.get("id") or payload.get("name") or "custom_agent")
+    created: dict | None = None
 
-    agent = _normalize_agent_payload({**payload, "id": agent_id})
-    records.append(agent)
-    CUSTOM_AGENTS.write(records)
-    return agent
+    def _mutate(records: list[dict]) -> list[dict]:
+        nonlocal created
+        existing_ids = {str(agent.get("id")) for agent in records}
+        agent_id = base_id
+        suffix = 2
+        while agent_id in existing_ids:
+            agent_id = f"{base_id}_{suffix}"
+            suffix += 1
+        created = _normalize_agent_payload({**payload, "id": agent_id})
+        return [*records, created]
+
+    CUSTOM_AGENTS.update(_mutate)
+    assert created is not None
+    return created
 
 
 def update_custom_agent(agent_id: str, payload: dict) -> dict | None:
-    records = CUSTOM_AGENTS.read()
-    for agent in records:
-        if agent.get("id") != agent_id:
-            continue
-        updates = {key: value for key, value in payload.items() if value is not None}
-        agent.update(_normalize_agent_payload({**agent, **updates}, keep_id=True))
-        CUSTOM_AGENTS.write(records)
-        return agent
-    return None
+    updated: dict | None = None
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        nonlocal updated
+        for agent in records:
+            if agent.get("id") != agent_id:
+                continue
+            updates = {key: value for key, value in payload.items() if value is not None}
+            agent.update(_normalize_agent_payload({**agent, **updates}, keep_id=True))
+            updated = agent
+            return records
+        return None
+
+    CUSTOM_AGENTS.update(_mutate)
+    return updated
 
 
 def delete_custom_agent(agent_id: str) -> bool:
-    records = CUSTOM_AGENTS.read()
-    next_records = [agent for agent in records if agent.get("id") != agent_id]
-    if len(next_records) == len(records):
-        return False
-    CUSTOM_AGENTS.write(next_records)
-    return True
+    deleted = False
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        nonlocal deleted
+        remaining = [agent for agent in records if agent.get("id") != agent_id]
+        if len(remaining) == len(records):
+            return None
+        deleted = True
+        return remaining
+
+    CUSTOM_AGENTS.update(_mutate)
+    return deleted
 
 
 def _normalize_agent_payload(payload: dict, keep_id: bool = False) -> dict:

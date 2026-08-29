@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from app.api.services.conversation_store import JsonStore
+from app.api.services.conversation_store import JsonStore, transaction
 
 
 RUNTIME_DIR = Path("agent-workspace/runtime")
@@ -21,13 +21,15 @@ def utc_now() -> str:
 
 
 def ensure_default_conversation() -> None:
-    conversations = CONVERSATIONS.read()
-    if conversations:
-        return
+    seeded = False
 
-    now = utc_now()
-    CONVERSATIONS.write(
-        [
+    def _seed(records: list[dict]) -> list[dict] | None:
+        nonlocal seeded
+        if records:
+            return None
+        seeded = True
+        now = utc_now()
+        return [
             {
                 "id": DEFAULT_CONVERSATION_ID,
                 "title": "Demo Conversation",
@@ -41,8 +43,10 @@ def ensure_default_conversation() -> None:
                 "last_message": "",
             }
         ]
-    )
-    MESSAGES.write([])
+
+    CONVERSATIONS.update(_seed)
+    if seeded:
+        MESSAGES.write([])
 
 
 def list_conversations(
@@ -105,9 +109,7 @@ def create_conversation(
         "updated_at": now,
         "last_message": "",
     }
-    conversations = CONVERSATIONS.read()
-    conversations.append(conversation)
-    CONVERSATIONS.write(conversations)
+    CONVERSATIONS.update(lambda records: [*records, conversation])
     return conversation
 
 
@@ -125,17 +127,23 @@ def get_conversation(conversation_id: str) -> dict | None:
 
 def update_conversation(conversation_id: str, updates: dict) -> dict | None:
     ensure_default_conversation()
-    conversations = CONVERSATIONS.read()
-    for conversation in conversations:
-        if conversation.get("id") != conversation_id:
-            continue
-        for key in ("title", "mode", "agent_ids"):
-            if key in updates and updates[key] is not None:
-                conversation[key] = updates[key]
-        conversation["updated_at"] = utc_now()
-        CONVERSATIONS.write(conversations)
-        return conversation
-    return None
+    updated: dict | None = None
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        nonlocal updated
+        for conversation in records:
+            if conversation.get("id") != conversation_id:
+                continue
+            for key in ("title", "mode", "agent_ids"):
+                if key in updates and updates[key] is not None:
+                    conversation[key] = updates[key]
+            conversation["updated_at"] = utc_now()
+            updated = conversation
+            return records
+        return None
+
+    CONVERSATIONS.update(_mutate)
+    return updated
 
 
 def set_conversation_pinned(conversation_id: str, is_pinned: bool) -> dict | None:
@@ -152,33 +160,37 @@ def set_conversation_trashed(conversation_id: str, is_trashed: bool) -> dict | N
 
 def delete_conversation(conversation_id: str) -> dict | None:
     ensure_default_conversation()
-    conversations = CONVERSATIONS.read()
-    deleted_conversation = next(
-        (
-            conversation
-            for conversation in conversations
-            if conversation.get("id") == conversation_id
-        ),
-        None,
-    )
-    if deleted_conversation is None:
-        return None
+    deleted: dict | None = None
 
-    CONVERSATIONS.write(
-        [
+    def _remove_conversation(records: list[dict]) -> list[dict] | None:
+        nonlocal deleted
+        remaining = [
             conversation
-            for conversation in conversations
+            for conversation in records
             if conversation.get("id") != conversation_id
         ]
-    )
-    MESSAGES.write(
-        [
+        if len(remaining) == len(records):
+            return None
+        deleted = next(
+            conversation
+            for conversation in records
+            if conversation.get("id") == conversation_id
+        )
+        return remaining
+
+    def _remove_messages(records: list[dict]) -> list[dict] | None:
+        remaining = [
             message
-            for message in MESSAGES.read()
+            for message in records
             if message.get("conversation_id") != conversation_id
         ]
-    )
-    return deleted_conversation
+        return remaining if len(remaining) != len(records) else None
+
+    with transaction(MESSAGES, CONVERSATIONS):
+        CONVERSATIONS.update(_remove_conversation)
+        if deleted is not None:
+            MESSAGES.update(_remove_messages)
+    return deleted
 
 
 def list_messages(conversation_id: str) -> list[dict]:
@@ -231,10 +243,9 @@ def add_message(
         "trace_events": trace_events or [],
         "created_at": now,
     }
-    messages = MESSAGES.read()
-    messages.append(message)
-    MESSAGES.write(messages)
-    _touch_conversation(conversation_id, content, now)
+    with transaction(MESSAGES, CONVERSATIONS):
+        MESSAGES.update(lambda records: [*records, message])
+        _touch_conversation(conversation_id, content, now)
     return message
 
 
@@ -253,25 +264,33 @@ def _set_conversation_flag(
     value: bool,
 ) -> dict | None:
     ensure_default_conversation()
-    conversations = CONVERSATIONS.read()
-    for conversation in conversations:
-        if conversation.get("id") != conversation_id:
-            continue
-        conversation[field] = value
-        conversation["updated_at"] = utc_now()
-        CONVERSATIONS.write(conversations)
-        return conversation
-    return None
+    updated: dict | None = None
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        nonlocal updated
+        for conversation in records:
+            if conversation.get("id") != conversation_id:
+                continue
+            conversation[field] = value
+            conversation["updated_at"] = utc_now()
+            updated = conversation
+            return records
+        return None
+
+    CONVERSATIONS.update(_mutate)
+    return updated
 
 
 def _touch_conversation(conversation_id: str, last_message: str, updated_at: str) -> None:
-    conversations = CONVERSATIONS.read()
-    for conversation in conversations:
-        if conversation.get("id") == conversation_id:
-            conversation["last_message"] = _summarize_message(last_message)
-            conversation["updated_at"] = updated_at
-            CONVERSATIONS.write(conversations)
-            return
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        for conversation in records:
+            if conversation.get("id") == conversation_id:
+                conversation["last_message"] = _summarize_message(last_message)
+                conversation["updated_at"] = updated_at
+                return records
+        return None
+
+    CONVERSATIONS.update(_mutate)
 
 
 def set_message_pinned(
@@ -280,16 +299,22 @@ def set_message_pinned(
     is_pinned: bool,
 ) -> dict | None:
     ensure_default_conversation()
-    messages = MESSAGES.read()
-    for message in messages:
-        if (
-            message.get("conversation_id") == conversation_id
-            and message.get("id") == message_id
-        ):
-            message["is_pinned"] = is_pinned
-            MESSAGES.write(messages)
-            return message
-    return None
+    updated: dict | None = None
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        nonlocal updated
+        for message in records:
+            if (
+                message.get("conversation_id") == conversation_id
+                and message.get("id") == message_id
+            ):
+                message["is_pinned"] = is_pinned
+                updated = message
+                return records
+        return None
+
+    MESSAGES.update(_mutate)
+    return updated
 
 
 def list_pinned_messages(conversation_id: str) -> list[dict]:
@@ -301,19 +326,23 @@ def list_pinned_messages(conversation_id: str) -> list[dict]:
 
 
 def deactivate_generation_group(conversation_id: str, generation_group_id: str) -> list[str]:
-    messages = MESSAGES.read()
     replaced: list[str] = []
-    for message in messages:
-        if (
-            message.get("conversation_id") == conversation_id
-            and message.get("generation_group_id") == generation_group_id
-            and message.get("role") == "agent"
-            and message.get("is_active_generation", True)
-        ):
-            message["is_active_generation"] = False
-            replaced.append(str(message.get("id")))
-    if replaced:
-        MESSAGES.write(messages)
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        changed = False
+        for message in records:
+            if (
+                message.get("conversation_id") == conversation_id
+                and message.get("generation_group_id") == generation_group_id
+                and message.get("role") == "agent"
+                and message.get("is_active_generation", True)
+            ):
+                message["is_active_generation"] = False
+                replaced.append(str(message.get("id")))
+                changed = True
+        return records if changed else None
+
+    MESSAGES.update(_mutate)
     return replaced
 
 

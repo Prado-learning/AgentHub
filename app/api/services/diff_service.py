@@ -74,9 +74,7 @@ def apply_diff_artifact(artifact_id: str) -> dict:
         "backups": backups,
         "status": "applied",
     }
-    records = APPLICATIONS.read()
-    records.append(record)
-    APPLICATIONS.write(records)
+    APPLICATIONS.update(lambda records: [*records, record])
     update_artifact(artifact_id, {"status": "applied", "apply_id": apply_id})
     return record
 
@@ -95,17 +93,33 @@ def get_structured_diff(artifact_id: str) -> dict:
 
 
 def rollback_diff_application(apply_id: str) -> dict:
-    records = APPLICATIONS.read()
-    for record in records:
-        if record.get("id") != apply_id:
-            continue
-        _restore_backups(record.get("backups", []))
-        record["status"] = "rolled_back"
-        APPLICATIONS.write(records)
-        if record.get("artifact_id"):
-            update_artifact(str(record["artifact_id"]), {"status": "rolled_back"})
-        return record
-    raise ValueError("Patch application not found")
+    target = next(
+        (record for record in APPLICATIONS.read() if record.get("id") == apply_id),
+        None,
+    )
+    if target is None:
+        raise ValueError("Patch application not found")
+
+    _restore_backups(target.get("backups", []))
+
+    rolled: dict | None = None
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        nonlocal rolled
+        for record in records:
+            if record.get("id") != apply_id:
+                continue
+            record["status"] = "rolled_back"
+            rolled = record
+            return records
+        return None
+
+    APPLICATIONS.update(_mutate)
+    if rolled is None:
+        raise ValueError("Patch application not found")
+    if rolled.get("artifact_id"):
+        update_artifact(str(rolled["artifact_id"]), {"status": "rolled_back"})
+    return rolled
 
 
 def _parse_unified_diff(content: str) -> list[FilePatch]:

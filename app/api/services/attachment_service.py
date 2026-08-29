@@ -63,9 +63,7 @@ def save_attachment(
         "url": f"/attachments/{attachment_id}/content",
         "extracted_text": _extract_text(file_path, guessed_mime),
     }
-    records = ATTACHMENTS.read()
-    records.append(record)
-    ATTACHMENTS.write(records)
+    ATTACHMENTS.update(lambda records: [*records, record])
     return _public_attachment(record)
 
 

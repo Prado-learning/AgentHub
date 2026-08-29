@@ -149,31 +149,35 @@ def _save_session(
     missing: list[str],
     provider_id: str,
 ) -> None:
-    sessions = [
-        session
-        for session in SESSIONS.read()
-        if session.get("conversation_id") != conversation_id
-    ]
-    sessions.append(
-        {
-            "conversation_id": conversation_id,
-            "status": "collecting",
-            "draft": draft,
-            "missing_fields": missing,
-            "model_provider": provider_id,
-        }
-    )
-    SESSIONS.write(sessions)
+    def _mutate(records: list[dict]) -> list[dict]:
+        return [
+            *[
+                session
+                for session in records
+                if session.get("conversation_id") != conversation_id
+            ],
+            {
+                "conversation_id": conversation_id,
+                "status": "collecting",
+                "draft": draft,
+                "missing_fields": missing,
+                "model_provider": provider_id,
+            },
+        ]
+
+    SESSIONS.update(_mutate)
 
 
 def _delete_session(conversation_id: str) -> None:
-    SESSIONS.write(
-        [
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        remaining = [
             session
-            for session in SESSIONS.read()
+            for session in records
             if session.get("conversation_id") != conversation_id
         ]
-    )
+        return remaining if len(remaining) != len(records) else None
+
+    SESSIONS.update(_mutate)
 
 
 def _string_list(value: object) -> list[str]:

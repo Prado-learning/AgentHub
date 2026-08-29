@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from app.api.services.conversation_store import JsonStore
+from app.api.services.conversation_store import JsonStore, transaction
 from agenthub.tools.builtin.preview import (
     build_preview_html_for_code,
     extract_previewable_html,
@@ -48,32 +48,41 @@ def save_artifacts(conversation_id: str, run_id: str, artifacts: list[dict]) -> 
     if not artifacts:
         return []
 
-    records = ARTIFACTS.read()
     saved: list[dict] = []
-    for artifact in artifacts:
-        artifact_id = f"{artifact.get('id', 'art')}_{uuid4().hex[:8]}"
-        saved_artifact = {
-            **artifact,
-            "id": artifact_id,
-            "conversation_id": conversation_id,
-            "run_id": run_id,
-        }
-        if saved_artifact.get("type") == "preview":
-            saved_artifact["preview_url"] = f"/artifacts/{artifact_id}/preview"
-            if saved_artifact.get("preview_html"):
-                PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
-                preview_path = PREVIEW_DIR / f"{artifact_id}.html"
-                preview_path.write_text(saved_artifact["preview_html"], encoding="utf-8")
-                saved_artifact["preview_file"] = str(preview_path)
-        records.append(saved_artifact)
-        _record_version(saved_artifact, "created")
-        saved.append(_public_artifact(saved_artifact))
-        derived_preview = _derived_preview_artifact(saved_artifact)
-        if derived_preview is not None:
-            records.append(derived_preview)
-            _record_version(derived_preview, "created")
-            saved.append(_public_artifact(derived_preview))
-    ARTIFACTS.write(records)
+    version_records: list[dict] = []
+
+    def _mutate_artifacts(records: list[dict]) -> list[dict]:
+        for artifact in artifacts:
+            artifact_id = f"{artifact.get('id', 'art')}_{uuid4().hex[:8]}"
+            saved_artifact = {
+                **artifact,
+                "id": artifact_id,
+                "conversation_id": conversation_id,
+                "run_id": run_id,
+            }
+            if saved_artifact.get("type") == "preview":
+                saved_artifact["preview_url"] = f"/artifacts/{artifact_id}/preview"
+                if saved_artifact.get("preview_html"):
+                    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+                    preview_path = PREVIEW_DIR / f"{artifact_id}.html"
+                    preview_path.write_text(saved_artifact["preview_html"], encoding="utf-8")
+                    saved_artifact["preview_file"] = str(preview_path)
+            records.append(saved_artifact)
+            _collect_version(saved_artifact, "created", version_records)
+            saved.append(_public_artifact(saved_artifact))
+            derived_preview = _derived_preview_artifact(saved_artifact)
+            if derived_preview is not None:
+                records.append(derived_preview)
+                _collect_version(derived_preview, "created", version_records)
+                saved.append(_public_artifact(derived_preview))
+        return records
+
+    def _mutate_versions(records: list[dict]) -> list[dict]:
+        return [*records, *version_records]
+
+    with transaction(ARTIFACTS, ARTIFACT_VERSIONS):
+        ARTIFACTS.update(_mutate_artifacts)
+        ARTIFACT_VERSIONS.update(_mutate_versions)
     return saved
 
 
@@ -96,15 +105,23 @@ def get_artifact(artifact_id: str) -> dict | None:
 
 
 def update_artifact(artifact_id: str, updates: dict) -> dict | None:
-    records = ARTIFACTS.read()
-    for artifact in records:
-        if artifact.get("id") != artifact_id:
-            continue
-        artifact.update(updates)
-        ARTIFACTS.write(records)
+    updated: dict | None = None
+
+    def _mutate(records: list[dict]) -> list[dict] | None:
+        nonlocal updated
+        for artifact in records:
+            if artifact.get("id") != artifact_id:
+                continue
+            artifact.update(updates)
+            updated = artifact
+            return records
+        return None
+
+    ARTIFACTS.update(_mutate)
+    if updated is not None:
         if "content" in updates:
-            _record_version(artifact, "edited")
-        return _public_artifact(artifact)
+            _record_version(updated, "edited")
+        return _public_artifact(updated)
     if artifact_id in MOCK_ARTIFACTS:
         MOCK_ARTIFACTS[artifact_id].update(updates)
         return MOCK_ARTIFACTS[artifact_id]
@@ -160,22 +177,31 @@ def _public_artifact(artifact: dict) -> dict:
     }
 
 
-def _record_version(artifact: dict, reason: str) -> None:
+def _version_record(artifact: dict, reason: str) -> dict | None:
     if artifact.get("content") is None:
+        return None
+    return {
+        "id": f"ver_{uuid4().hex[:12]}",
+        "artifact_id": artifact.get("id"),
+        "title": artifact.get("title"),
+        "language": artifact.get("language"),
+        "content": artifact.get("content", ""),
+        "reason": reason,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _collect_version(artifact: dict, reason: str, collected: list[dict]) -> None:
+    version = _version_record(artifact, reason)
+    if version is not None:
+        collected.append(version)
+
+
+def _record_version(artifact: dict, reason: str) -> None:
+    version = _version_record(artifact, reason)
+    if version is None:
         return
-    versions = ARTIFACT_VERSIONS.read()
-    versions.append(
-        {
-            "id": f"ver_{uuid4().hex[:12]}",
-            "artifact_id": artifact.get("id"),
-            "title": artifact.get("title"),
-            "language": artifact.get("language"),
-            "content": artifact.get("content", ""),
-            "reason": reason,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    ARTIFACT_VERSIONS.write(versions)
+    ARTIFACT_VERSIONS.update(lambda records: [*records, version])
 
 
 def _derived_preview_artifact(artifact: dict) -> dict | None:
