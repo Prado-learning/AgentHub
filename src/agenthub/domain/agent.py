@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
@@ -17,6 +17,7 @@ class AgentDefinition:
     capabilities: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
+    system_prompt: str = ""
     model_provider: str | None = None
     model_name: str | None = None
-
+    avatar: str | None = None

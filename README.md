@@ -21,14 +21,20 @@ AgentHub 是一个基于 FastAPI 与 React 的 Web 多 Agent 协作工作台。�
 ```mermaid
 flowchart LR
     UI["React / Vite 前端"] --> API["FastAPI API"]
-    API --> Runtime["HarnessRunner"]
-    Runtime --> Orchestrator["Orchestrator"]
-    Orchestrator --> Agents["内置 / 自定义 Agent"]
+    API --> Harness["HarnessRunner 执行运行时"]
+    Harness -->|"规划"| Orchestrator["Orchestrator 规划器"]
+    Harness -->|"执行"| Agents["内置 / 自定义 Agent"]
     Agents --> Models["OpenAI-compatible 模型"]
     Agents --> CLI["Codex / Claude Code / OpenCode CLI"]
-    Agents --> Tools["内置工具"]
+    Harness --> Tools["内置工具（权限校验）"]
+    Harness --> Artifacts["产物构建与冲突合并"]
     API --> Workspace["agent-workspace 运行时数据"]
 ```
+
+职责划分：`orchestration` 负责规划（把一条消息拆成带依赖关系的 PlanStep），
+`harness` 负责执行（调度并行步骤、调用适配器、工具权限校验、运行限额、
+失败降级和产物聚合）。模型调用对 429/5xx/超时做指数退避重试，
+不可重试错误（401/400 等）快速失败。
 
 ## 目录结构
 
@@ -39,9 +45,11 @@ app/
   web/                  React / Vite 前端
 src/agenthub/
   adapters/             模型与外部 CLI 适配器
-  artifacts/            产物与冲突处理
-  harness/              Agent 运行框架
-  orchestration/        任务规划、调度和聚合
+  artifacts/            产物构建、冲突处理与版本
+  domain/               Agent/Artifact/Plan 等领域模型
+  harness/              执行运行时（runner、权限、限额、降级）
+  orchestration/        任务规划（规则 + LLM Planner）
+  policies/             Agent/Tool/Run 策略
   tools/                内置工具
 skills/                 Agent 技能提示词
 tests/                  后端自动化测试
