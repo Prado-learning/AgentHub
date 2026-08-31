@@ -16,10 +16,10 @@ import type {
   ToolPreferences,
 } from "./types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const API_PREFIX = "/api";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(`${API_PREFIX}${path}`, {
     headers: {
       "Content-Type": "application/json",
       ...options?.headers,
@@ -35,6 +35,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export function postJSON<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  return request<T>(path, {
+    method: "POST",
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
 export function sendChatMessage(
   content: string,
   conversationId: string,
@@ -46,10 +54,11 @@ export function sendChatMessage(
   modelName?: string,
   agentMode?: "single" | "multi",
   toolPreferences?: ToolPreferences,
+  signal?: AbortSignal,
 ): Promise<ChatResponse> {
-  return request<ChatResponse>("/chat", {
-    method: "POST",
-    body: JSON.stringify({
+  return postJSON<ChatResponse>(
+    "/chat",
+    {
       conversation_id: conversationId,
       message: {
         role: "user",
@@ -64,8 +73,9 @@ export function sendChatMessage(
       model_name: modelName,
       agent_mode: agentMode,
       tool_preferences: toolPreferences,
-    }),
-  });
+    },
+    signal,
+  );
 }
 
 export function regenerateChatMessage(
@@ -77,10 +87,11 @@ export function regenerateChatMessage(
   modelName?: string,
   agentMode?: "single" | "multi",
   toolPreferences?: ToolPreferences,
+  signal?: AbortSignal,
 ): Promise<ChatResponse> {
-  return request<ChatResponse>("/chat/regenerate", {
-    method: "POST",
-    body: JSON.stringify({
+  return postJSON<ChatResponse>(
+    "/chat/regenerate",
+    {
       conversation_id: conversationId,
       message: {
         role: "user",
@@ -93,8 +104,9 @@ export function regenerateChatMessage(
       model_name: modelName,
       agent_mode: agentMode,
       tool_preferences: toolPreferences,
-    }),
-  });
+    },
+    signal,
+  );
 }
 
 export async function getAgents(): Promise<Agent[]> {

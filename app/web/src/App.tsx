@@ -1,4 +1,4 @@
-import { ChangeEvent, CSSProperties, Dispatch, FormEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, Dispatch, FormEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   applyArtifactDiff,
@@ -54,7 +54,7 @@ import type {
   ToolPreferences,
 } from "./types";
 
-const API_ORIGIN = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const API_ORIGIN = "/api";
 const TRASH_STORAGE_KEY = "agenthub:trashed-conversations";
 const defaultAgentIds = ["orchestrator", "codex", "ui_builder", "code_reviewer"];
 const defaultToolPreferences: ToolPreferences = {
@@ -101,6 +101,9 @@ const emptyConversationRuntime: ConversationRuntimeState = {
   quotedText: "",
   thinkingStartedAt: null,
 };
+
+type ToastKind = "info" | "success" | "error";
+type ToastEntry = { id: number; message: string; kind: ToastKind };
 
 const labels = {
   appTagline: "多智能体（Agent）协作工作台",
@@ -211,8 +214,11 @@ function App() {
   const [agentEditorDraft, setAgentEditorDraft] = useState<AgentCreateInput | null>(null);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightTab, setRightTab] = useState<RightPanelTab>("artifacts");
+  const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
+  const [agentRowExpanded, setAgentRowExpanded] = useState(false);
   const [conversationWidth, setConversationWidth] = useState(280);
   const [rightPanelWidth, setRightPanelWidth] = useState(410);
   const [trashedConversations, setTrashedConversations] = useState<Conversation[]>(readLegacyTrashedConversations);
@@ -225,6 +231,7 @@ function App() {
   const [mentionQuery, setMentionQuery] = useState("");
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const hasMigratedLegacyTrashRef = useRef(false);
+  const abortControllersByConversationRef = useRef<Record<string, AbortController>>({});
 
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
   const activeDetail = detailsByConversation[activeConversationId] ?? emptyConversationDetail;
@@ -280,7 +287,7 @@ function App() {
   }, [mentionAgents, mentionQuery, mentionStart]);
   const pinnedMessages = messages.filter((message) => message.is_pinned);
   const shellStyle = {
-    "--conversation-width": `${conversationWidth}px`,
+    "--conversation-width": leftSidebarOpen ? `${conversationWidth}px` : "60px",
     "--right-panel-width": rightPanelOpen ? `${rightPanelWidth}px` : "0px",
   } as CSSProperties;
   const runningConversationCount = Object.values(runtimeByConversation).filter((runtime) => runtime.isSending).length;
@@ -401,6 +408,22 @@ function App() {
     const timer = window.setTimeout(() => setToast(""), 1800);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  const pushToast = useCallback((message: string, kind: ToastKind = "info") => {
+    const id = Date.now() + Math.random();
+    setToasts((current) => [...current, { id, message, kind }]);
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((entry) => entry.id !== id));
+    }, 4200);
+  }, []);
+
+  function cancelInFlight(conversationId: string) {
+    const controller = abortControllersByConversationRef.current[conversationId];
+    if (controller) {
+      controller.abort();
+      delete abortControllersByConversationRef.current[conversationId];
+    }
+  }
 
   useEffect(() => {
     resizeComposerInput();
@@ -535,6 +558,52 @@ function App() {
       await pinConversation(conversation.id);
     }
     await reloadConversations(conversation.id);
+  }
+
+  async function handleChangeMode(nextMode: "single" | "multi") {
+    if (nextMode === agentMode) {
+      return;
+    }
+    setAgentMode(nextMode);
+    const nextAgentIds =
+      nextMode === "multi" ? defaultAgentIds : [draftAgentIds[0] ?? "orchestrator"];
+    setDraftAgentIds(nextAgentIds);
+    if (activeConversation) {
+      try {
+        await updateConversation(activeConversation.id, {
+          mode: nextMode === "multi" ? "group" : "single",
+          agent_ids: nextAgentIds,
+        });
+        await reloadConversations(activeConversation.id);
+      } catch (err) {
+        setToast(err instanceof Error ? err.message : "模式切换失败");
+      }
+    }
+  }
+
+  function handleToggleAgentForActiveConversation(agentId: string) {
+    if (!activeConversation) {
+      return;
+    }
+    const current = activeConversation.agent_ids.length ? activeConversation.agent_ids : draftAgentIds;
+    const isMulti = activeConversation.mode !== "single";
+    let next: string[];
+    if (isMulti) {
+      next = current.includes(agentId)
+        ? current.filter((id) => id !== agentId)
+        : [...current, agentId];
+      if (next.length === 0) {
+        return;
+      }
+    } else {
+      next = [agentId];
+    }
+    setDraftAgentIds(next);
+    updateConversation(activeConversation.id, {
+      agent_ids: next,
+    })
+      .then(() => reloadConversations(activeConversation.id))
+      .catch((err) => setToast(err instanceof Error ? err.message : "Agent 选择失败"));
   }
 
   async function handleArchive(conversation: Conversation) {
@@ -702,6 +771,8 @@ function App() {
       ...current,
       messages: [...current.messages, optimisticMessage],
     }));
+    const abortController = new AbortController();
+    abortControllersByConversationRef.current[conversationId] = abortController;
     updateConversationRuntime(conversationId, (current) => ({
       ...current,
       input: "",
@@ -722,6 +793,7 @@ function App() {
         undefined,
         agentMode,
         toolPreferences,
+        abortController.signal,
       );
       applyChatResponse(conversationId, response);
       updateConversationRuntime(conversationId, (current) => ({
@@ -732,13 +804,21 @@ function App() {
       }));
       await reloadConversations(conversationId);
       getAgents().then(setAgents).catch(() => undefined);
+      pushToast("回复已生成", "success");
     } catch (err) {
-      updateConversationRuntime(conversationId, (current) => ({
-        ...current,
-        progressSteps: markProgressError(current.progressSteps, err instanceof Error ? err.message : "Send failed"),
-      }));
-      setError(err instanceof Error ? err.message : "Send failed");
+      if (err instanceof DOMException && err.name === "AbortError") {
+        pushToast("已取消发送", "info");
+      } else {
+        updateConversationRuntime(conversationId, (current) => ({
+          ...current,
+          progressSteps: markProgressError(current.progressSteps, err instanceof Error ? err.message : "Send failed"),
+        }));
+        const message = err instanceof Error ? err.message : "Send failed";
+        setError(message);
+        pushToast(message, "error");
+      }
     } finally {
+      delete abortControllersByConversationRef.current[conversationId];
       updateConversationRuntime(conversationId, { isSending: false, thinkingStartedAt: null });
     }
   }
@@ -753,6 +833,8 @@ function App() {
       return;
     }
     const conversationId = activeConversation.id;
+    const abortController = new AbortController();
+    abortControllersByConversationRef.current[conversationId] = abortController;
     updateConversationRuntime(conversationId, {
       isSending: true,
       progressSteps: initialProgressSteps(selectedModelId, lastUserMessage.attachment_ids?.length ?? 0),
@@ -768,16 +850,25 @@ function App() {
         undefined,
         agentMode,
         toolPreferences,
+        abortController.signal,
       );
       applyChatResponse(conversationId, response);
       await reloadConversations(conversationId);
+      pushToast("已重新生成", "success");
     } catch (err) {
-      updateConversationRuntime(conversationId, (current) => ({
-        ...current,
-        progressSteps: markProgressError(current.progressSteps, err instanceof Error ? err.message : "Regenerate failed"),
-      }));
-      setError(err instanceof Error ? err.message : "Regenerate failed");
+      if (err instanceof DOMException && err.name === "AbortError") {
+        pushToast("已取消重新生成", "info");
+      } else {
+        updateConversationRuntime(conversationId, (current) => ({
+          ...current,
+          progressSteps: markProgressError(current.progressSteps, err instanceof Error ? err.message : "Regenerate failed"),
+        }));
+        const message = err instanceof Error ? err.message : "Regenerate failed";
+        setError(message);
+        pushToast(message, "error");
+      }
     } finally {
+      delete abortControllersByConversationRef.current[conversationId];
       updateConversationRuntime(conversationId, { isSending: false, thinkingStartedAt: null });
     }
   }
@@ -1069,7 +1160,7 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${rightPanelOpen ? "with-right-panel" : "right-panel-collapsed"}`} style={shellStyle}>
+    <main className={`app-shell ${rightPanelOpen ? "with-right-panel" : "right-panel-collapsed"} ${leftSidebarOpen ? "" : "left-pane-collapsed"}`} style={shellStyle}>
       <aside className="conversation-pane">
         <section className="brand">
           <div>
@@ -1241,14 +1332,41 @@ function App() {
           })}
         </nav>
         <header className="chat-header">
-          <div>
+          <button
+            className="header-icon-button"
+            type="button"
+            aria-label={leftSidebarOpen ? "收起左栏" : "展开左栏"}
+            onClick={() => setLeftSidebarOpen((current) => !current)}
+          >
+            {leftSidebarOpen ? "‹" : "›"}
+          </button>
+          <div className="chat-header-title">
             <h1>{activeConversation?.title ?? labels.emptyTitle}</h1>
           </div>
-          <div className="header-pills">
-            <span>{agentMode === "multi" ? labels.multi : labels.single}</span>
-            <span>{selectedAgentIds.length} 智能体（Agents）</span>
-            <button type="button" onClick={() => setRightPanelOpen((current) => !current)}>
-              {rightPanelOpen ? labels.collapse : labels.expand}
+          <div className="header-actions">
+            <button
+              className="header-icon-button"
+              type="button"
+              aria-label="Agent 管理"
+              title="Agent 管理"
+              onClick={() => {
+                setRightTab("agents");
+                setRightPanelOpen(true);
+              }}
+            >
+              ⌘
+            </button>
+            <button
+              className="header-icon-button"
+              type="button"
+              aria-label="上下文/调试"
+              title="上下文/调试"
+              onClick={() => {
+                setRightTab("context");
+                setRightPanelOpen(true);
+              }}
+            >
+              ⊞
             </button>
           </div>
         </header>
@@ -1297,6 +1415,30 @@ function App() {
           ) : null}
           {!isSending && progressSteps.some((step) => step.status === "error") ? <ProgressPanel steps={progressSteps} /> : null}
         </section>
+
+        <AgentRow
+          activeConversation={activeConversation}
+          agentMode={agentMode}
+          agents={agents}
+          draftAgentIds={draftAgentIds}
+          expanded={agentRowExpanded}
+          isSending={isSending}
+          models={models}
+          selectedAgentIds={selectedAgentIds}
+          selectedModelId={selectedModelId}
+          toolPreferences={toolPreferences}
+          onChangeMode={handleChangeMode}
+          onClearAgent={(agentId) => handleToggleAgentForActiveConversation(agentId)}
+          onSelectAgent={(agentId) => handleToggleAgentForActiveConversation(agentId)}
+          onSetModel={setSelectedModelId}
+          onToggleTool={(key) =>
+            setToolPreferences((current) => ({
+              ...current,
+              [key]: !current[key],
+            }))
+          }
+          onToggleExpanded={() => setAgentRowExpanded((current) => !current)}
+        />
 
         <form className="composer" onSubmit={handleSubmit}>
           {quotedMessage ? (
@@ -1363,15 +1505,14 @@ function App() {
                 <input multiple type="file" onChange={handleFiles} />
               </label>
             </div>
-            {error ? <span className="error-text">{error}</span> : <span />}
             <div className="composer-actions">
-              <select className="model-select" value={selectedModelId} onChange={(event) => setSelectedModelId(event.target.value)}>
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>{model.name}</option>
-                ))}
-              </select>
-              <button className="send-button" disabled={!activeConversation || isSending || !input.trim()} type="submit">
-                {isSending ? labels.sending : labels.send}
+              <button
+                className={`send-button ${isSending ? "sending" : ""}`}
+                disabled={!activeConversation || (!isSending && !input.trim())}
+                type={isSending ? "button" : "submit"}
+                onClick={isSending && activeConversation ? () => cancelInFlight(activeConversation.id) : undefined}
+              >
+                {isSending ? "停止" : labels.send}
               </button>
             </div>
           </div>
@@ -1450,6 +1591,7 @@ function App() {
           </div>
         </div>
       ) : null}
+      <ToastStack toasts={toasts} onDismiss={(id) => setToasts((current) => current.filter((entry) => entry.id !== id))} />
       {toast ? <div className="toast">{toast}</div> : null}
 
       <aside className={`trash-drawer ${isTrashOpen ? "open" : ""}`}>
@@ -1571,9 +1713,6 @@ function MessageCard({
             <button type="button" onClick={onExtractMemory}>智能记忆</button>
           </div>
         </header>
-        {message.role === "agent" ? (
-          <ThinkingSummary events={message.trace_events ?? []} label={t.thinking} sender={sender} content={message.content} />
-        ) : null}
         {message.quoted_message_id || message.quoted_text ? <small className="quoted-line">{t.quoted}: {message.quoted_text || message.quoted_message_id}</small> : null}
         {message.generation_index && message.generation_index > 1 ? (
           <small className="quoted-line">版本 {message.generation_index}{message.is_active_generation === false ? "（旧版）" : ""}</small>
@@ -1599,6 +1738,14 @@ function MessageCard({
               {t.regenerate}
             </button>
           </div>
+        ) : null}
+        {message.role === "agent" ? (
+          <ThinkingSummary
+            events={message.trace_events ?? []}
+            label={t.thinking}
+            sender={sender}
+            content={message.content}
+          />
         ) : null}
       </div>
     </article>
@@ -1800,12 +1947,24 @@ function ThinkingSummary({
   label: string;
   sender: string;
 }) {
-  const steps = events.length ? [] : buildThinkingSummary(sender, content);
+  const hasEvents = events.length > 0;
+  const steps = hasEvents ? [] : buildThinkingSummary(sender, content);
   const duration = traceDuration(events);
+  const stepCount = events.length || steps.length;
+  if (!hasEvents && !steps.length) {
+    return null;
+  }
   return (
     <details className="thinking-summary">
-      <summary>{duration ? `已思考（用时 ${duration}）` : label}</summary>
-      {events.length ? (
+      <summary>
+        <span className="thinking-summary-icon" aria-hidden="true">⌛</span>
+        <span className="thinking-summary-text">
+          {duration ? `已思考 ${duration}` : label}
+          {stepCount ? ` · ${stepCount} 步` : ""}
+        </span>
+        <span className="thinking-summary-toggle" aria-hidden="true">展开</span>
+      </summary>
+      {hasEvents ? (
         <ol className="thinking-trace">
           {events.map((event, index) => (
             <li className={event.status === "error" ? "error" : ""} key={event.id ?? `${event.type}-${index}`}>
@@ -3156,6 +3315,179 @@ function clearLegacyTrashedConversations() {
   } catch {
     // The server-side trash state is the source of truth now.
   }
+}
+
+function AgentRow({
+  activeConversation,
+  agentMode,
+  agents,
+  draftAgentIds,
+  expanded,
+  isSending,
+  models,
+  selectedAgentIds,
+  selectedModelId,
+  toolPreferences,
+  onChangeMode,
+  onClearAgent,
+  onSelectAgent,
+  onSetModel,
+  onToggleTool,
+  onToggleExpanded,
+}: {
+  activeConversation: Conversation | undefined;
+  agentMode: "single" | "multi";
+  agents: Agent[];
+  draftAgentIds: string[];
+  expanded: boolean;
+  isSending: boolean;
+  models: ModelOption[];
+  selectedAgentIds: string[];
+  selectedModelId: string;
+  toolPreferences: ToolPreferences;
+  onChangeMode: (mode: "single" | "multi") => void;
+  onClearAgent: (agentId: string) => void;
+  onSelectAgent: (agentId: string) => void;
+  onSetModel: (id: string) => void;
+  onToggleTool: (key: keyof ToolPreferences) => void;
+  onToggleExpanded: () => void;
+}) {
+  const isMulti = agentMode === "multi";
+  const selectedSet = new Set(selectedAgentIds);
+  const toolMeta: Array<{ key: keyof ToolPreferences; label: string; symbol: string }> = [
+    { key: "file", label: "文件", symbol: "📎" },
+    { key: "image", label: "图片", symbol: "🖼" },
+    { key: "preview", label: "预览", symbol: "👁" },
+    { key: "diff", label: "Diff", symbol: "🔀" },
+  ];
+  return (
+    <section className="agent-row" aria-label="Agent 与工具">
+      <div className="agent-row-mode">
+        <button
+          className="mode-badge"
+          type="button"
+          onClick={() => onChangeMode(isMulti ? "single" : "multi")}
+          disabled={!activeConversation || isSending}
+          aria-pressed={isMulti}
+          title={!activeConversation ? "请先选择或新建会话" : "切换 Agent 模式"}
+        >
+          {isMulti ? "多智能体" : "单智能体"}
+        </button>
+      </div>
+      <div className="agent-row-chips">
+        {selectedAgentIds.map((agentId) => {
+          const agent = agents.find((item) => item.id === agentId);
+          return (
+            <span className="agent-chip" key={agentId}>
+              <AvatarBadge value={agentId} className="agent-chip-avatar" />
+              <span className="agent-chip-name">{agentNameForDisplay(agent ?? { id: agentId, name: agentId } as Agent)}</span>
+              <button
+                aria-label={`移除 ${agentId}`}
+                className="agent-chip-remove"
+                type="button"
+                onClick={() => onClearAgent(agentId)}
+                disabled={!activeConversation || isSending || (isMulti && selectedAgentIds.length <= 1)}
+              >
+                ×
+              </button>
+            </span>
+          );
+        })}
+        <button
+          aria-label="添加 Agent"
+          className="agent-chip agent-chip-add"
+          type="button"
+          onClick={onToggleExpanded}
+          disabled={!activeConversation || isSending}
+        >
+          +
+        </button>
+      </div>
+      <div className="agent-row-tools">
+        {toolMeta.map((tool) => (
+          <button
+            key={tool.key}
+            className={`tool-toggle ${toolPreferences[tool.key] ? "on" : ""}`}
+            type="button"
+            aria-pressed={toolPreferences[tool.key]}
+            title={tool.label}
+            onClick={() => onToggleTool(tool.key)}
+          >
+            <span aria-hidden="true">{tool.symbol}</span>
+          </button>
+        ))}
+      </div>
+      <div className="agent-row-model">
+        <select
+          aria-label="模型"
+          className="model-select compact"
+          value={selectedModelId}
+          onChange={(event) => onSetModel(event.target.value)}
+          disabled={isSending}
+        >
+          {models.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      {expanded ? (
+        <div className="agent-row-picker" role="listbox">
+          {agents.map((agent) => {
+            const isSelected = selectedSet.has(agent.id);
+            return (
+              <button
+                className={`picker-option ${isSelected ? "selected" : ""}`}
+                key={agent.id}
+                type="button"
+                role="option"
+                aria-selected={isSelected}
+                title={`${agentNameForDisplay(agent)} · @${agent.id}`}
+                onClick={() => onSelectAgent(agent.id)}
+                disabled={isSending}
+              >
+                <AvatarBadge value={agent.id} className="agent-chip-avatar" />
+                <span className="picker-option-name">{agentNameForDisplay(agent)}</span>
+                <span className="picker-option-mark" aria-hidden="true">
+                  {isSelected ? "✓" : "+"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ToastStack({
+  toasts,
+  onDismiss,
+}: {
+  toasts: ToastEntry[];
+  onDismiss: (id: number) => void;
+}) {
+  if (toasts.length === 0) {
+    return null;
+  }
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {toasts.map((entry) => (
+        <div className={`toast-card toast-${entry.kind}`} key={entry.id}>
+          <span className="toast-message">{entry.message}</span>
+          <button
+            aria-label="Dismiss"
+            className="toast-close"
+            type="button"
+            onClick={() => onDismiss(entry.id)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function AvatarBadge({ value, className = "" }: { value: string; className?: string }) {

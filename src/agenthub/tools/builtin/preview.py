@@ -58,6 +58,18 @@ def _looks_like_full_html(content: str) -> bool:
     )
 
 
+_FRAGMENT_TAG_PATTERN = re.compile(
+    r"<\s*(?:div|span|p|h[1-6]|section|article|main|nav|header|footer|"
+    r"ul|ol|li|table|tr|td|th|form|input|button|img|a)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_html_fragment(content: str) -> bool:
+    """Detect HTML fragments like <div>...</div>, <span>...</span>, etc."""
+    return bool(_FRAGMENT_TAG_PATTERN.search(content))
+
+
 def _normalize_preview_html(title: str, html: str) -> str:
     if _looks_like_full_html(html):
         return html
