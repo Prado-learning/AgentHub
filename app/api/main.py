@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import agents, artifacts, attachments, chat, conversations, deployments
+from app.api.routers import agents, artifacts, attachments, chat, conversations, deployments, run_decisions
 
 
 app = FastAPI(title="AgentHub Demo API", version="0.1.0")
@@ -61,6 +61,7 @@ app.include_router(agents.router)
 app.include_router(artifacts.router)
 app.include_router(attachments.router)
 app.include_router(deployments.router)
+app.include_router(run_decisions.router)
 
 
 @app.get("/health")

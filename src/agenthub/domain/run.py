@@ -35,4 +35,10 @@ class RunResult:
     messages: list[dict] = field(default_factory=list)
     artifacts: list[dict] = field(default_factory=list)
     events: list[RunEvent] = field(default_factory=list)
+    debug_trace: list["StageTrace"] = field(default_factory=list)
+
+
+# Imported at module bottom to keep the public surface flat and avoid a
+# circular import if the trace module ever needs to reference RunEvent.
+from agenthub.domain.trace import StageTrace  # noqa: E402
 

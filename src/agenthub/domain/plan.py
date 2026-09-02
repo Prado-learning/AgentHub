@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass, field
 
+from agenthub.domain.authority import AuthorityTier
+
 
 @dataclass(frozen=True)
 class PlanStep:
@@ -11,6 +13,8 @@ class PlanStep:
     tools: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
     can_run_parallel: bool = True
+    authority: AuthorityTier = AuthorityTier.L1_READONLY
+    can_short_circuit: bool = False
 
 
 @dataclass(frozen=True)

@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
 import re
 from typing import Any
 
+from agenthub.domain.authority import AuthorityTier
 from agenthub.domain.plan import Plan, PlanStep
 from agenthub.domain.run import RunContext
 from agenthub.infrastructure.config.env import env_flag, load_env_file
@@ -15,6 +16,48 @@ from agenthub.application.agents.runtime_profile import (
     AgentRuntimeProfile,
     load_agent_runtime_profiles,
 )
+
+
+# Authority tiers keyed by the tool an agent step is using. Mirrors the
+# article's L1/L2/L3 model:
+#   L1 — read-only: query, recognise, compare (auto-executable)
+#   L2 — reversible: generate UI/code, write review (still auto for now)
+#   L3 — irreversible: deploy, execute workflow (SOP only)
+_TOOL_AUTHORITY: dict[str, AuthorityTier] = {
+    # L1 — read-only / query / recognise (auto-executable)
+    "file_reader_tool": AuthorityTier.L1_READONLY,
+    "image_reader_tool": AuthorityTier.L1_READONLY,
+    "document_preview_tool": AuthorityTier.L1_READONLY,
+    "code_review_tool": AuthorityTier.L1_READONLY,
+    # L2 — reversible / generate / write suggestion (human confirms before apply)
+    "preview_tool": AuthorityTier.L2_REVERSIBLE,
+    "ui_builder_tool": AuthorityTier.L2_REVERSIBLE,
+    "file_writer_tool": AuthorityTier.L2_REVERSIBLE,
+    "reply_template_tool": AuthorityTier.L2_REVERSIBLE,
+    "create_artifact_tool": AuthorityTier.L2_REVERSIBLE,
+    # L3 — irreversible / deploy / execute workflow (SOP only)
+    "workflow_builder_tool": AuthorityTier.L3_IRREVERSIBLE,
+    "deploy_tool": AuthorityTier.L3_IRREVERSIBLE,
+    "push_branch_tool": AuthorityTier.L3_IRREVERSIBLE,
+    "merge_request_tool": AuthorityTier.L3_IRREVERSIBLE,
+    "release_tool": AuthorityTier.L3_IRREVERSIBLE,
+}
+
+
+def infer_authority(tools: list[str]) -> AuthorityTier:
+    """Pick the highest tier touched by any tool in this step.
+
+    Reversible and irreversible steps must wait for explicit confirmation
+    before they can produce real side effects; the harness records the
+    tier in the trace regardless of whether the gate is enforced today.
+    """
+
+    tier = AuthorityTier.L1_READONLY
+    for tool_id in tools:
+        candidate = _TOOL_AUTHORITY.get(tool_id, AuthorityTier.L1_READONLY)
+        if candidate.value > tier.value:
+            tier = candidate
+    return tier
 
 
 class Orchestrator:
@@ -68,7 +111,14 @@ class Orchestrator:
 
         if context.mode == "single" and context.selected_agents:
             return Plan(
-                steps=[self._build_step("step_1", context.selected_agents[0], message)],
+                steps=[
+                    self._build_step(
+                        "step_1",
+                        context.selected_agents[0],
+                        message,
+                        can_short_circuit=True,
+                    )
+                ],
                 reason="single chat selected agent",
             )
 
@@ -355,15 +405,19 @@ class Orchestrator:
         explicit_tools: list[str] | None = None,
         depends_on: list[str] | None = None,
         can_run_parallel: bool = True,
+        can_short_circuit: bool = False,
     ) -> PlanStep:
         tools = explicit_tools if explicit_tools is not None else self._tools_for(agent_id)
+        effective_tools = [tool_id for tool_id in tools if tool_id in self.available_tool_ids]
         return PlanStep(
             id=step_id,
             agent_id=agent_id,
             task=self._task_for(agent_id, message),
-            tools=[tool_id for tool_id in tools if tool_id in self.available_tool_ids],
+            tools=effective_tools,
             depends_on=depends_on or [],
             can_run_parallel=can_run_parallel,
+            authority=infer_authority(effective_tools),
+            can_short_circuit=can_short_circuit,
         )
 
     def _extract_mentions(self, message: str) -> dict[str, list[str]]:
