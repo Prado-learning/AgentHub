@@ -188,6 +188,31 @@ export type ToolPreferences = {
   diff: boolean;
 };
 
+export type PendingDecision = {
+  run_id: string;
+  step_id: string;
+  agent_id: string;
+  authority: "L1" | "L2" | "L3";
+  task: string;
+  artifact_count: number;
+  status: "pending" | "applied" | "rejected";
+  created_at: string;
+  updated_at: string;
+};
+
+export type DebugStage = {
+  stage_id: string;
+  stage_name: string;
+  started_at: string;
+  cost_ms: number;
+  inputs: Record<string, unknown>;
+  raw_api_data: Record<string, unknown>;
+  branch_hit: string | null;
+  outputs: Record<string, unknown>;
+  error: string | null;
+  final: boolean;
+};
+
 export type ConversationCreateInput = {
   title?: string;
   mode?: ConversationMode;

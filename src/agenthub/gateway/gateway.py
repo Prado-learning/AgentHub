@@ -15,7 +15,7 @@ from typing import Any, Protocol
 
 from agenthub.adapters.base import AgentAdapter, AgentResult, AgentTask
 from agenthub.domain.run import RunContext
-from agenthub.gateway.cache import CacheBackend, NoopCache, cache_key
+from agenthub.gateway.cache import CacheBackend, NoopCache, SingleFlight, cache_key, semantic_key
 from agenthub.gateway.signing import NoopSigner, Signer
 
 
@@ -78,7 +78,10 @@ class NoopGateway:
         # Honour a positive TTL by attempting the cache lookup, but the
         # default NoopCache misses every time, so this stays a
         # pass-through.
-        key = cache_key([dispatch.endpoint, dispatch.task.instruction, *dispatch.extra_key_parts])
+        key = semantic_key(
+            dispatch.endpoint,
+            [dispatch.task.instruction, *dispatch.extra_key_parts],
+        )
         hit = self._cache.get(key)
         if hit is not None:
             return _agent_result_from_cache(hit)
@@ -185,27 +188,61 @@ class CachingGateway:
         cache: CacheBackend,
         signer: Signer | None = None,
         default_ttl_seconds: int = 3_600_000,
+        singleflight: bool = True,
     ) -> None:
         self._cache = cache
         self._signer = signer or NoopSigner()
         self._default_ttl_seconds = default_ttl_seconds
+        self._singleflight = SingleFlight(cache) if singleflight else None
 
     def dispatch(
         self,
         adapter: AgentAdapter,
         dispatch: GatewayDispatch,
     ) -> AgentResult:
-        key = cache_key(
-            [dispatch.endpoint, dispatch.task.instruction, *dispatch.extra_key_parts]
+        key = semantic_key(
+            dispatch.endpoint,
+            [dispatch.task.instruction, *dispatch.extra_key_parts],
         )
+        ttl = dispatch.cache_ttl_seconds or self._default_ttl_seconds
+
+        if self._singleflight is not None:
+            cacheable = self._maybe_singleflight(adapter, dispatch, key, ttl)
+            return _agent_result_from_cache(cacheable)
+
+        return self._run_with_cache(adapter, dispatch, key, ttl)
+
+    def _maybe_singleflight(
+        self,
+        adapter: AgentAdapter,
+        dispatch: GatewayDispatch,
+        key: str,
+        ttl: int,
+    ) -> dict[str, Any]:
+        """Run through singleflight; cache only successful results."""
+
+        def _compute() -> dict[str, Any]:
+            result = adapter.run(dispatch.task, dispatch.context)
+            if ttl > 0 and result.status == "success":
+                self._cache.set(key, _agent_result_to_cache(result), ttl)
+            return _agent_result_to_cache(result)
+
+        assert self._singleflight is not None
+        return self._singleflight.get_or_compute(key, _compute)
+
+    def _run_with_cache(
+        self,
+        adapter: AgentAdapter,
+        dispatch: GatewayDispatch,
+        key: str,
+        ttl: int,
+    ) -> AgentResult:
         hit = self._cache.get(key)
         if hit is not None:
             return _agent_result_from_cache(hit)
         result = adapter.run(dispatch.task, dispatch.context)
-        ttl = dispatch.cache_ttl_seconds or self._default_ttl_seconds
         if ttl > 0 and result.status == "success":
             self._cache.set(key, _agent_result_to_cache(result), ttl)
-        _ = self._signer  # Signature is consumed by callers issuing real HTTP.
         return result
 
     def cached(self) -> CacheBackend:

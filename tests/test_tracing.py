@@ -120,7 +120,9 @@ def test_harness_runner_run_with_tracer_enabled_populates_debug_trace(
     # middle as Phase 2 wired them through ``begin_stage``.
     assert stage_ids[0] == "run.started"
     assert "run.planned" in stage_ids
-    assert stage_ids[-1] == "run.completed"
+    # The trailing lifecycle can be either ``run.completed`` (older
+    # harness) or ``run.metrics`` once Phase 3 monitoring is enabled.
+    assert stage_ids[-1] in {"run.completed", "run.metrics"}
     # We expect at least one step-level stage and one tool-level stage
     # because ui_builder / file_reader run inside begin_stage blocks.
     assert any(sid.startswith("step_") for sid in stage_ids), stage_ids
@@ -155,4 +157,4 @@ def test_harness_runner_explicit_tracer_overrides_env(monkeypatch: pytest.Monkey
     )
     stage_ids = [trace.stage_id for trace in runner.debug_trace]
     assert stage_ids[0] == "run.started"
-    assert stage_ids[-1] == "run.completed"
+    assert stage_ids[-1] in {"run.completed", "run.metrics"}

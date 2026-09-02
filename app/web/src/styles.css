@@ -2586,3 +2586,400 @@ button:disabled {
 .app-shell.left-pane-collapsed .conversation-pane > *:not(.rail) {
   display: none;
 }
+
+/* Approval queue — L2/L3 pending confirmations */
+.status-chip.pending {
+  background: rgba(248, 196, 86, 0.18);
+  color: #c98a16;
+  border-color: rgba(248, 196, 86, 0.45);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.approvals-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.approvals-error {
+  color: #c0392b;
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.pending-confirmation-card {
+  border: 1px solid rgba(127, 127, 127, 0.18);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pending-confirmation-card.pending-l3 {
+  border-color: rgba(192, 57, 43, 0.35);
+  background: rgba(255, 240, 235, 0.7);
+}
+
+.pending-confirmation-card.pending-l2 {
+  border-color: rgba(241, 196, 15, 0.4);
+  background: rgba(255, 252, 235, 0.7);
+}
+
+.pending-confirmation-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.pending-authority-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+}
+
+.pending-authority-tag.authority-l1 {
+  background: rgba(46, 204, 113, 0.2);
+  color: #1e8449;
+}
+
+.pending-authority-tag.authority-l2 {
+  background: rgba(241, 196, 15, 0.25);
+  color: #9a7d0a;
+}
+
+.pending-authority-tag.authority-l3 {
+  background: rgba(231, 76, 60, 0.2);
+  color: #922b21;
+}
+
+.pending-agent {
+  color: rgba(80, 80, 80, 0.85);
+  font-size: 11px;
+}
+
+.pending-task {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #2c3e50;
+  word-break: break-word;
+}
+
+.pending-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 11px;
+  color: #555;
+}
+
+.pending-meta dt {
+  font-weight: 600;
+  color: #333;
+  display: inline;
+}
+
+.pending-meta dt::after {
+  content: "：";
+}
+
+.pending-meta dd {
+  display: inline;
+  margin: 0;
+}
+
+.pending-warning {
+  margin: 0;
+  font-size: 11px;
+  color: #922b21;
+  background: rgba(255, 255, 255, 0.45);
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.pending-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.pending-btn {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  background: #f4f4f4;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.pending-btn.confirm {
+  background: rgba(46, 204, 113, 0.15);
+  border-color: rgba(46, 204, 113, 0.5);
+  color: #1e8449;
+  font-weight: 600;
+}
+
+.pending-btn.confirm:hover:not(:disabled) {
+  background: rgba(46, 204, 113, 0.25);
+}
+
+.pending-btn.decline {
+  background: rgba(231, 76, 60, 0.12);
+  border-color: rgba(231, 76, 60, 0.4);
+  color: #922b21;
+}
+
+.pending-btn.decline:hover:not(:disabled) {
+  background: rgba(231, 76, 60, 0.22);
+}
+
+.pending-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.pending-decline-form,
+.pending-note-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pending-decline-form textarea,
+.pending-note-form input {
+  width: 100%;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.pending-error {
+  margin: 0;
+  color: #c0392b;
+  font-size: 11px;
+}
+
+/* Debug trace panel — opened from an agent message */
+.message-trace-row {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.message-trace-row button {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  background: rgba(127, 127, 127, 0.08);
+  cursor: pointer;
+  color: #444;
+}
+
+.message-trace-row button:hover {
+  background: rgba(127, 127, 127, 0.16);
+}
+
+.debug-trace-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 48px 16px;
+  z-index: 90;
+}
+
+.debug-trace-panel {
+  background: #fff;
+  border-radius: 12px;
+  width: min(720px, 100%);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.debug-trace-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+}
+
+.debug-trace-header strong {
+  display: block;
+  font-size: 15px;
+}
+
+.debug-trace-header small {
+  color: #666;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.debug-trace-loading,
+.debug-trace-empty,
+.debug-trace-error {
+  padding: 14px 18px;
+  margin: 0;
+  font-size: 13px;
+  color: #444;
+}
+
+.debug-trace-error {
+  color: #c0392b;
+}
+
+.debug-trace-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 18px;
+  font-size: 12px;
+  color: #555;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.15);
+  background: rgba(127, 127, 127, 0.04);
+}
+
+.debug-trace-summary .error {
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.debug-trace-list {
+  list-style: none;
+  padding: 12px 18px;
+  margin: 0;
+  overflow-y: auto;
+}
+
+.debug-stage {
+  border-left: 2px solid rgba(127, 127, 127, 0.25);
+  padding: 0 0 8px 12px;
+  margin-bottom: 10px;
+}
+
+.debug-stage.error {
+  border-left-color: #c0392b;
+}
+
+.debug-stage.final {
+  border-left-color: #2ecc71;
+}
+
+.debug-stage-summary {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+}
+
+.debug-stage-name {
+  font-weight: 600;
+}
+
+.debug-stage-cost,
+.debug-stage-time {
+  font-size: 11px;
+  color: #555;
+  font-family: monospace;
+}
+
+.debug-stage-branch {
+  font-size: 11px;
+  color: #2c3e50;
+  background: rgba(52, 152, 219, 0.12);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.debug-stage-flag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.debug-stage-flag.final {
+  background: rgba(46, 204, 113, 0.2);
+  color: #1e8449;
+}
+
+.debug-stage-flag.error {
+  background: rgba(231, 76, 60, 0.18);
+  color: #922b21;
+}
+
+.debug-stage-toggle {
+  margin-left: auto;
+  color: #777;
+  font-size: 12px;
+}
+
+.debug-stage-body {
+  margin-top: 6px;
+  background: rgba(127, 127, 127, 0.05);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.debug-stage-block strong {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #555;
+  margin-bottom: 2px;
+}
+
+.debug-stage-block pre {
+  margin: 0;
+  font-family: monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #2c3e50;
+}
+
+.debug-stage-block.empty {
+  color: #888;
+  font-style: italic;
+}
+
+.debug-stage-block.error pre {
+  color: #c0392b;
+}
+

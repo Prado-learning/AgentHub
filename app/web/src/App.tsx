@@ -1,5 +1,8 @@
 import { ChangeEvent, CSSProperties, Dispatch, FormEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { PendingConfirmationCard } from "./components/PendingConfirmationCard";
+import { DebugTracePanel } from "./components/DebugTracePanel";
+import { usePendingDecisions } from "./hooks";
 import {
   applyArtifactDiff,
   archiveConversation,
@@ -47,6 +50,7 @@ import type {
   ConversationMode,
   ConversationMemory,
   ModelOption,
+  PendingDecision,
   StructuredDiff,
   StructuredDiffLine,
   TraceEvent,
@@ -64,7 +68,7 @@ const defaultToolPreferences: ToolPreferences = {
   diff: true,
 };
 
-type RightPanelTab = "artifacts" | "agents" | "tools" | "context";
+type RightPanelTab = "artifacts" | "agents" | "tools" | "context" | "approvals";
 type ProgressStep = {
   id: string;
   label: string;
@@ -223,6 +227,7 @@ function App() {
   const [rightPanelWidth, setRightPanelWidth] = useState(410);
   const [trashedConversations, setTrashedConversations] = useState<Conversation[]>(readLegacyTrashedConversations);
   const [isTrashOpen, setIsTrashOpen] = useState(false);
+  const [openTraceRunId, setOpenTraceRunId] = useState<string>("");
   const [deleteTargetConversation, setDeleteTargetConversation] = useState<Conversation | null>(null);
   const [openConversationMenuId, setOpenConversationMenuId] = useState("");
   const [renamingConversationId, setRenamingConversationId] = useState("");
@@ -291,7 +296,10 @@ function App() {
     "--right-panel-width": rightPanelOpen ? `${rightPanelWidth}px` : "0px",
   } as CSSProperties;
   const runningConversationCount = Object.values(runtimeByConversation).filter((runtime) => runtime.isSending).length;
-  const visibleRightTabs: RightPanelTab[] = ["artifacts", "agents", "context"];
+  const visibleRightTabs: RightPanelTab[] = ["artifacts", "agents", "context", "approvals"];
+  const pendingDecisionsState = usePendingDecisions(5000);
+  const pendingDecisionCount = pendingDecisionsState.pending.length;
+  const refreshPendingDecisions = pendingDecisionsState.refresh;
 
   function updateConversationDetail(
     conversationId: string,
@@ -1174,6 +1182,18 @@ function App() {
           <span className={`status-chip ${runningConversationCount ? "running" : ""}`}>
             {runningConversationCount ? `${labels.running} ${runningConversationCount}` : labels.ready}
           </span>
+          {pendingDecisionCount > 0 ? (
+            <button
+              type="button"
+              className="status-chip pending"
+              onClick={() => {
+                setRightPanelOpen(true);
+                setRightTab("approvals");
+              }}
+            >
+              待审批 {pendingDecisionCount}
+            </button>
+          ) : null}
           <button className="archive-toggle small" type="button" onClick={() => setShowArchived((current) => !current)}>
             {showArchived ? labels.showActive : labels.showArchived}
           </button>
@@ -1400,6 +1420,7 @@ function App() {
                 onRestoreVersion={handleRestoreArtifactVersion}
                 regenerating={isSending}
                 onToast={setToast}
+                onOpenTrace={(runId) => setOpenTraceRunId(runId)}
               />
             ))
           )}
@@ -1556,6 +1577,10 @@ function App() {
           setAgentEditorDraft={setAgentEditorDraft}
           onEditAgent={beginEditAgent}
           onSaveAgent={handleSaveAgent}
+          pendingDecisions={pendingDecisionsState.pending}
+          pendingDecisionsLoading={pendingDecisionsState.loading}
+          pendingDecisionsError={pendingDecisionsState.error}
+          refreshPendingDecisions={refreshPendingDecisions}
           pinnedMessages={pinnedMessages}
           memories={activeDetail.memories}
           onDeleteMemory={handleDeleteMemory}
@@ -1648,6 +1673,12 @@ function App() {
           </section>
         </div>
       ) : null}
+      {openTraceRunId ? (
+        <DebugTracePanel
+          runId={openTraceRunId}
+          onClose={() => setOpenTraceRunId("")}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1669,6 +1700,7 @@ function MessageCard({
   onRun,
   regenerating,
   onToast,
+  onOpenTrace,
 }: {
   attachmentMap: Map<string, Attachment>;
   artifactMap: Map<string, Artifact>;
@@ -1686,12 +1718,14 @@ function MessageCard({
   onRun: (artifact: Artifact) => void;
   regenerating: boolean;
   onToast: (message: string) => void;
+  onOpenTrace: (runId: string) => void;
 }) {
   const messageAttachments = (message.attachment_ids ?? [])
     .map((id) => attachmentMap.get(id))
     .filter(Boolean) as Attachment[];
   const sender = message.role === "user" ? "user" : message.sender ?? "agent";
   const displayName = displayNameForSender(sender);
+  const traceRunId = message.trace_events?.find((event) => event.run_id)?.run_id ?? "";
 
   return (
     <article className={`message-card ${message.role}`}>
@@ -1746,6 +1780,13 @@ function MessageCard({
             sender={sender}
             content={message.content}
           />
+        ) : null}
+        {message.role === "agent" && traceRunId ? (
+          <div className="message-trace-row">
+            <button type="button" onClick={() => onOpenTrace(traceRunId)}>
+              查看 Run Trace
+            </button>
+          </div>
         ) : null}
       </div>
     </article>
@@ -2108,6 +2149,10 @@ function RightPanelContent({
   onRestoreVersion,
   onSaveAgent,
   onToast,
+  pendingDecisions,
+  pendingDecisionsLoading,
+  pendingDecisionsError,
+  refreshPendingDecisions,
   pinnedMessages,
   previewArtifact,
   selectedAgentIds,
@@ -2138,6 +2183,10 @@ function RightPanelContent({
   onRestoreVersion: (artifact: Artifact, versionId: string) => void;
   onSaveAgent: (event: FormEvent) => void;
   onToast: (message: string) => void;
+  pendingDecisions: PendingDecision[];
+  pendingDecisionsLoading: boolean;
+  pendingDecisionsError: string | null;
+  refreshPendingDecisions: () => Promise<void>;
   pinnedMessages: ChatMessage[];
   previewArtifact: Artifact | null;
   selectedAgentIds: string[];
@@ -2378,6 +2427,46 @@ function RightPanelContent({
         <section className="side-card">
           <strong>Attachments</strong>
           {attachments.length ? attachments.map((attachment) => <p key={attachment.id}>{attachment.filename}</p>) : <p>暂无附件</p>}
+        </section>
+      </div>
+    );
+  }
+
+  if (tab === "approvals") {
+    return (
+      <div className="right-content">
+        <section className="side-card">
+          <div className="approvals-header">
+            <strong>L2 / L3 待审批队列</strong>
+            <button
+              className="archive-toggle small"
+              type="button"
+              onClick={() => { void refreshPendingDecisions(); }}
+              disabled={pendingDecisionsLoading}
+            >
+              {pendingDecisionsLoading ? "刷新中…" : "刷新"}
+            </button>
+          </div>
+          {pendingDecisionsError ? (
+            <p className="approvals-error">⚠ {pendingDecisionsError}</p>
+          ) : null}
+          {pendingDecisions.length === 0 && !pendingDecisionsLoading ? (
+            <p>当前没有待处理的审批。harness 完成 L2/L3 步骤后会出现在这里。</p>
+          ) : null}
+          {pendingDecisions.map((decision) => (
+            <PendingConfirmationCard
+              key={`${decision.run_id}::${decision.step_id}`}
+              decision={decision}
+              onResolved={(updated) => {
+                if (updated.status === "applied") {
+                  onToast(`已确认 step ${updated.step_id}`);
+                } else if (updated.status === "rejected") {
+                  onToast(`已拒绝 step ${updated.step_id}`);
+                }
+                void refreshPendingDecisions();
+              }}
+            />
+          ))}
         </section>
       </div>
     );
@@ -3297,6 +3386,7 @@ function rightTabLabel(tab: RightPanelTab): string {
     agents: labels.agents,
     tools: labels.tools,
     context: labels.context,
+    approvals: "审批队列",
   }[tab];
 }
 

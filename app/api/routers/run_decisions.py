@@ -1,6 +1,6 @@
-"""REST endpoints for L2 / L3 user decisions.
+"""REST endpoints for L2 / L3 user decisions and per-run debug trace.
 
-Three endpoints back the front-end approval queue:
+The decision endpoints back the front-end approval queue:
 
 * ``GET /runs/{run_id}/pending-confirmations`` — refresh the queue for
   one run.
@@ -9,10 +9,17 @@ Three endpoints back the front-end approval queue:
 * ``POST /runs/{run_id}/steps/{step_id}/confirm`` — flip to ``applied``.
 * ``POST /runs/{run_id}/steps/{step_id}/decline`` — flip to ``rejected``.
 
-All endpoints are backed by :mod:`app.api.services.decision_service`
-which holds the on-disk JSON store; the harness writes
-``upsert_pending`` records whenever a step requests confirmation, and
-this router resolves them.
+The debug-trace endpoint exposes the persisted :class:`RunResult`
+snapshot so the UI can replay every stage:
+
+* ``GET /runs/{run_id}/debug-trace`` — return every stage the harness
+  recorded for that run.
+
+All endpoints are backed by JSON stores in
+:mod:`app.api.services`; the harness writes ``upsert_pending`` records
+whenever a step requests confirmation, and
+:func:`chat_service.build_chat_response` saves the run snapshot before
+returning the chat payload.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.services import run_store
 from app.api.services.decision_service import (
     confirm_step,
     decline_step,
@@ -125,3 +133,33 @@ def read_decision(run_id: str, step_id: str) -> dict:
     if decision is None:
         raise HTTPException(status_code=404, detail="no decision recorded yet")
     return {"decision": decision}
+
+
+@router.get("/runs/{run_id}/debug-trace")
+def read_debug_trace(run_id: str) -> dict:
+    """Return the persisted per-stage trace for one run.
+
+    The chat service snapshots :class:`RunResult.debug_trace` to disk
+    before the chat response goes out, so this endpoint can serve
+    historical stages long after the harness has finished.
+
+    Stages come back in the order the harness recorded them. An empty
+    list means the run is unknown or had tracing disabled.
+    """
+
+    snapshot = run_store.load_run_result(run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"unknown run_id {run_id}")
+    return {
+        "run_id": run_id,
+        "status": snapshot.get("status", "unknown"),
+        "saved_at": snapshot.get("saved_at"),
+        "stages": snapshot.get("debug_trace", []),
+    }
+
+
+@router.get("/runs")
+def list_runs() -> dict:
+    """List every run id currently on disk (sorted by run_id)."""
+
+    return {"run_ids": run_store.list_run_ids()}

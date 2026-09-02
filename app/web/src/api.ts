@@ -10,7 +10,9 @@ import type {
   ConversationCreateInput,
   ConversationMemory,
   ConversationUpdateInput,
+  DebugStage,
   ModelOption,
+  PendingDecision,
   StructuredDiff,
   ToolOption,
   ToolPreferences,
@@ -414,4 +416,55 @@ export function runWorkflowArtifact(
       model_name: modelName,
     }),
   });
+}
+
+export async function listPendingDecisions(): Promise<PendingDecision[]> {
+  const data = await request<{ pending_confirmations: PendingDecision[] }>(
+    "/runs/pending-confirmations",
+  );
+  return data.pending_confirmations;
+}
+
+export async function listPendingDecisionsForRun(
+  runId: string,
+): Promise<PendingDecision[]> {
+  const data = await request<{ pending_confirmations: PendingDecision[] }>(
+    `/runs/${runId}/pending-confirmations`,
+  );
+  return data.pending_confirmations;
+}
+
+export async function confirmRunStep(
+  runId: string,
+  stepId: string,
+  input: { actor?: string; note?: string } = {},
+): Promise<PendingDecision> {
+  const data = await request<{ decision: PendingDecision }>(
+    `/runs/${runId}/steps/${stepId}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+  return data.decision;
+}
+
+export async function declineRunStep(
+  runId: string,
+  stepId: string,
+  input: { actor?: string; reason?: string } = {},
+): Promise<PendingDecision> {
+  const data = await request<{ decision: PendingDecision }>(
+    `/runs/${runId}/steps/${stepId}/decline`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+  return data.decision;
+}
+
+export async function getDebugTrace(runId: string): Promise<DebugStage[]> {
+  const data = await request<{ stages: DebugStage[] }>(`/runs/${runId}/debug-trace`);
+  return data.stages;
 }

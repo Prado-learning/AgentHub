@@ -296,6 +296,14 @@ class HarnessRunner:
         }
         run_events.append(self._record_event("run.completed", completed_payload))
         self.tracer.record_lifecycle("run.completed", "Run completed", completed_payload)
+        run_events.append(
+            self._record_event("run.metrics", self._build_run_metrics(plan, step_results, artifacts))
+        )
+        self.tracer.record_lifecycle(
+            "run.metrics",
+            "Run metrics",
+            self._build_run_metrics(plan, step_results, artifacts),
+        )
         messages.append(
             self._summary_message(
                 plan_steps=plan.steps,
@@ -654,6 +662,53 @@ class HarnessRunner:
         event = RunEvent(type=event_type, payload=payload)
         self.events.append(event)
         return event
+
+    def _build_run_metrics(
+        self,
+        plan: Plan,
+        step_results: dict[str, "StepExecutionResult"],
+        artifacts: list[dict],
+    ) -> dict[str, Any]:
+        """Aggregate monitoring counters for one completed run.
+
+        Emitted alongside ``run.completed`` so dashboards and the trace
+        panel can render consistent counters without re-parsing every
+        stage. Counters are intentionally cheap — no per-step cost
+        detail, just the roll-up needed to spot regressions.
+        """
+
+        stages = self.tracer.stages
+        stage_costs = [stage.cost_ms for stage in stages if stage.cost_ms]
+        statuses = [result.status for result in step_results.values()]
+        authority_counts: dict[str, int] = {}
+        for result in step_results.values():
+            authority_counts[result.authority.value] = (
+                authority_counts.get(result.authority.value, 0) + 1
+            )
+        agent_counts: dict[str, int] = {}
+        for step in plan.steps:
+            agent_counts[step.agent_id] = agent_counts.get(step.agent_id, 0) + 1
+        cache_hits = sum(
+            1 for stage in stages if stage.outputs.get("cache_hit") is True
+        )
+        return {
+            "run_id": self._current_run_id or "",
+            "steps_planned": len(plan.steps),
+            "steps_succeeded": statuses.count("success"),
+            "steps_failed": statuses.count("failed"),
+            "steps_short_circuited": sum(
+                1 for stage in stages if stage.final
+            ),
+            "llm_calls": sum(
+                1 for stage in stages if stage.stage_name.startswith("llm.")
+            ),
+            "cache_hits": cache_hits,
+            "artifact_count": len(artifacts),
+            "total_cost_ms": sum(stage_costs),
+            "max_stage_cost_ms": max(stage_costs) if stage_costs else 0,
+            "authority_tier_counts": authority_counts,
+            "agent_call_counts": agent_counts,
+        }
 
     def _run_status(self, results: dict[str, StepExecutionResult]) -> str:
         if not results:

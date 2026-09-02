@@ -67,7 +67,11 @@ def test_authority_tiers_carry_through_run_result(
     # code_reviewer uses code_review_tool → L1
     assert steps_by_agent["code_reviewer"]["authority"] == "L1"
 
-    summary = runner.events[-1]
+    summary = next(
+        (event for event in runner.events if event.type == "run.completed"),
+        None,
+    )
+    assert summary is not None
     assert "authority_tiers" in summary.payload
     assert "L1" in summary.payload["authority_tiers"]
 

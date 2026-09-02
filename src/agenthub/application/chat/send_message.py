@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
-from agenthub.domain.run import RunContext
+from agenthub.domain.run import RunContext, RunResult
 from agenthub.orchestration.coordinator import HarnessRunner
 from agenthub.adapters import build_agent_adapters_from_env
 from app.api.services.artifact_service import save_artifacts
@@ -21,7 +23,12 @@ from app.api.services.conversation_service import (
 
 
 class SendMessageUseCase:
-    def execute(self, request: dict) -> dict:
+    def execute(
+        self,
+        request: dict,
+        *,
+        on_run_result: Callable[[RunResult], None] | None = None,
+    ) -> dict:
         conversation_id = request["conversation_id"]
         conversation = get_conversation(conversation_id)
         if conversation is None:
@@ -82,6 +89,8 @@ class SendMessageUseCase:
             model_name=request.get("model_name"),
         )
         result = HarnessRunner(mode="configured", adapters=adapters).run(context)
+        if on_run_result is not None:
+            on_run_result(result)
         events = [
             {
                 "type": event.type,
