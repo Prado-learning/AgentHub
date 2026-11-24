@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.services.artifact_service import (
     get_artifact,
@@ -25,6 +25,11 @@ class ArtifactUpdateRequest(BaseModel):
     title: str | None = None
     content: str | None = None
     language: str | None = None
+
+
+class DiffApplyRequest(BaseModel):
+    review_token: str = Field(min_length=64, max_length=64)
+    hunk_ids: list[str] | None = None
 
 
 class WorkflowRunRequest(BaseModel):
@@ -73,7 +78,9 @@ def read_artifact_preview(artifact_id: str) -> str:
     html = get_preview_html(artifact_id)
     if html is None:
         raise HTTPException(status_code=404, detail="Preview not found")
-    return html
+    from app.api.routers.deployments import SANDBOX_HEADERS
+
+    return HTMLResponse(html, headers=SANDBOX_HEADERS)
 
 
 @router.get("/artifacts/{artifact_id}/diff")
@@ -85,9 +92,15 @@ def read_artifact_diff(artifact_id: str) -> dict:
 
 
 @router.post("/artifacts/{artifact_id}/apply")
-def apply_artifact_diff(artifact_id: str) -> dict:
+def apply_artifact_diff(artifact_id: str, request: DiffApplyRequest) -> dict:
     try:
-        return {"application": apply_diff_artifact(artifact_id)}
+        return {
+            "application": apply_diff_artifact(
+                artifact_id,
+                review_token=request.review_token,
+                hunk_ids=request.hunk_ids,
+            )
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -116,3 +129,22 @@ def execute_workflow_artifact(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/artifacts/{artifact_id}/start", status_code=202)
+def start_workflow(artifact_id: str, request: WorkflowRunRequest) -> dict:
+    from app.api.services.execution_service import start_chat
+
+    artifact = get_artifact(artifact_id)
+    if not artifact or artifact.get("type") != "workflow":
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    try:
+        return start_chat(
+            {
+                **request.model_dump(),
+                "conversation_id": artifact["conversation_id"],
+                "_workflow_artifact_id": artifact_id,
+            }
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

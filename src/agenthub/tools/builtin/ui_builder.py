@@ -1,14 +1,20 @@
-﻿from agenthub.tools.schemas import ToolResult
+from html import escape
+from agenthub.tools.schemas import ToolResult
 
 
-def ui_builder_tool(prompt: str) -> ToolResult:
+def ui_builder_tool(prompt: str, code: str = "") -> ToolResult:
+    """Package upstream generated code; without code emit an explicitly labelled brief."""
+    if code:
+        return ToolResult(
+            id="ui_source", type="code", title="Generated UI", content=code
+        )
     return ToolResult(
-        id="art_001",
-        type="code",
-        title="TodoList.tsx",
+        id="ui_brief",
+        type="document",
+        title="UI implementation brief",
         content=(
-            f"// generated from: {prompt}\n"
-            "export default function TodoList() { return <div>Todo List</div>; }"
+            "Implementation requested:\n"
+            + prompt
+            + "\nNo source code was produced by the model. Configure a real model to generate the implementation."
         ),
     )
-

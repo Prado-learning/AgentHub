@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -32,35 +32,33 @@ def resolve_model_selection(
     model_name: str | None = None,
 ) -> ModelSelection:
     load_env_file()
-    selected_provider = (provider_id or os.environ.get("DEFAULT_MODEL_PROVIDER") or "auto").strip()
+    selected_provider = (
+        provider_id or os.environ.get("DEFAULT_MODEL_PROVIDER") or "auto"
+    ).strip()
     if selected_provider == "auto":
         selected_provider = os.environ.get("DEFAULT_MODEL_PROVIDER") or "stepfun"
 
     config = _model_config(selected_provider)
-    prefixes = [
-        prefix
-        for prefix in [
-            config.get("env_prefix"),
-            config.get("fallback_env_prefix"),
-            "OPENAI",
-        ]
-        if prefix
-    ]
-
+    prefix = str(config.get("env_prefix") or selected_provider.upper())
+    fallback = config.get("fallback_env_prefix")
+    # Never combine one provider's credential with another provider's URL.
+    if (
+        not os.environ.get(f"{prefix}_API_KEY")
+        and not os.environ.get(f"{prefix}_BASE_URL")
+        and fallback
+    ):
+        prefix = str(fallback)
     resolved_model = (
         model_name
-        or _first_env(prefixes, "MODEL_NAME")
-        or os.environ.get("MODEL_NAME")
+        or os.environ.get(f"{prefix}_MODEL_NAME")
+        or (os.environ.get("MODEL_NAME") if prefix == "OPENAI" else "")
         or "mock"
     )
     return ModelSelection(
         provider_id=selected_provider,
         model_name=resolved_model,
-        api_key=_first_env(prefixes, "API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
-        base_url=(
-            _first_env(prefixes, "BASE_URL")
-            or os.environ.get("OPENAI_BASE_URL", "")
-        ),
+        api_key=os.environ.get(f"{prefix}_API_KEY", ""),
+        base_url=os.environ.get(f"{prefix}_BASE_URL", ""),
     )
 
 
@@ -77,4 +75,3 @@ def _first_env(prefixes: list[str], suffix: str) -> str:
         if value:
             return value
     return ""
-

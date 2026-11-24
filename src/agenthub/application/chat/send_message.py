@@ -1,28 +1,34 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 from agenthub.domain.run import RunContext, RunResult
-from agenthub.orchestration.coordinator import HarnessRunner
-from agenthub.adapters import build_agent_adapters_from_env
-from app.api.services.artifact_service import save_artifacts
-from app.api.services.attachment_service import get_attachment_records_by_ids
-from app.api.services.context_summary_service import get_or_update_summary
-from app.api.services.memory_service import list_memories
-from app.api.services.agent_creation_service import handle_agent_creation_message
-from app.api.services.conversation_service import (
-    add_message,
-    deactivate_generation_group,
-    get_conversation,
-    list_messages,
-    list_pinned_messages,
-    next_generation_index,
-)
+from dataclasses import dataclass
+from agenthub.infrastructure.config.paths import conversation_workspace
+
+
+@dataclass
+class ChatServices:
+    get_conversation: Callable
+    add_message: Callable
+    list_messages: Callable
+    list_pinned_messages: Callable
+    get_attachments: Callable
+    handle_agent_creation: Callable
+    get_summary: Callable
+    list_artifacts: Callable
+    list_memories: Callable
+    execute_context: Callable
+    publish_result: Callable
+    deactivate_generation_group: Callable
 
 
 class SendMessageUseCase:
+    def __init__(self, services: ChatServices) -> None:
+        self.services = services
+
     def execute(
         self,
         request: dict,
@@ -30,13 +36,18 @@ class SendMessageUseCase:
         on_run_result: Callable[[RunResult], None] | None = None,
     ) -> dict:
         conversation_id = request["conversation_id"]
-        conversation = get_conversation(conversation_id)
+        conversation = self.services.get_conversation(conversation_id)
         if conversation is None:
             raise ValueError("Conversation not found")
 
         message = request["message"]
         attachment_ids = message.get("attachment_ids") or []
-        saved_user_message = add_message(
+        attachments = self.services.get_attachments(attachment_ids)
+        if len(attachments) != len(set(attachment_ids)) or any(
+            a.get("conversation_id") != conversation_id for a in attachments
+        ):
+            raise ValueError("Attachment does not belong to this conversation")
+        saved_user_message = self.services.add_message(
             conversation_id=conversation_id,
             role=message["role"],
             sender="you" if message["role"] == "user" else message["role"],
@@ -48,9 +59,12 @@ class SendMessageUseCase:
             quoted_range=message.get("quoted_range"),
             attachment_ids=attachment_ids,
         )
-        history = list_messages(conversation_id)
-        attachments = get_attachment_records_by_ids(attachment_ids)
-        agent_creation = handle_agent_creation_message(
+        history = [
+            m
+            for m in self.services.list_messages(conversation_id)
+            if m.get("is_active", True)
+        ]
+        agent_creation = self.services.handle_agent_creation(
             conversation_id,
             message["content"],
             history,
@@ -58,94 +72,55 @@ class SendMessageUseCase:
             model_name=request.get("model_name"),
         )
         if agent_creation is not None:
-            return self._save_agent_creation_response(
+            response = self._save_agent_creation_response(
                 conversation_id,
                 saved_user_message,
                 agent_creation,
             )
-        summary = get_or_update_summary(
+            response["run_id"] = request.get("_run_id") or response["run_id"]
+            return response
+        summary = self.services.get_summary(
             conversation_id,
             history,
             model_provider=request.get("model_provider"),
             model_name=request.get("model_name"),
         )
-        pinned_context = list_pinned_messages(conversation_id)
-        conversation_memories = list_memories(conversation_id)
+        pinned_context = self.services.list_pinned_messages(conversation_id)
+        conversation_memories = self.services.list_memories(conversation_id)
 
         context = RunContext(
             conversation_id=conversation_id,
             message=message["content"],
             history=history,
-            selected_agents=request.get("selected_agents") or conversation.get("agent_ids", []),
-            mode="single" if request.get("agent_mode") == "single" else conversation.get("mode", "group"),
+            selected_agents=request.get("selected_agents")
+            or conversation.get("agent_ids", []),
+            mode="single"
+            if request.get("agent_mode") == "single"
+            else conversation.get("mode", "group"),
             pinned_context=pinned_context,
             conversation_memories=conversation_memories,
             conversation_summary=summary,
             attachments=attachments,
             tool_preferences=request.get("tool_preferences") or {},
+            workspace_dir=str(conversation_workspace(conversation_id)),
+            upstream_artifacts=[
+                a
+                for a in self.services.list_artifacts(conversation_id)
+                if a.get("type") in {"code", "preview", "diff", "workflow"}
+            ][-8:],
         )
-        adapters = build_agent_adapters_from_env(
+        result = self.services.execute_context(
+            context,
+            run_id=request.get("_run_id"),
             model_provider=request.get("model_provider"),
             model_name=request.get("model_name"),
         )
-        result = HarnessRunner(mode="configured", adapters=adapters).run(context)
         if on_run_result is not None:
             on_run_result(result)
-        events = [
-            {
-                "type": event.type,
-                "payload": event.payload,
-                "created_at": event.created_at.isoformat(),
-            }
-            for event in result.events
-        ]
-        trace_events = _trace_events(
-            [
-                *_diagnostic_events(request, attachments, history, context),
-                *events,
-            ],
-            run_id=result.run_id,
-        )
-        saved_artifacts = save_artifacts(
-            conversation_id=conversation_id,
-            run_id=result.run_id,
-            artifacts=result.artifacts,
-        )
-        artifact_ids = [artifact["id"] for artifact in saved_artifacts]
-        generation_group_id = (
-            request.get("regenerate_from_message_id")
-            or message.get("quoted_message_id")
-            or saved_user_message["id"]
-        )
-        replaced_message_ids = []
+        group = request.get("regenerate_from_message_id") or saved_user_message["id"]
         if request.get("regenerate_from_message_id"):
-            replaced_message_ids = deactivate_generation_group(conversation_id, generation_group_id)
-        generation_index = next_generation_index(conversation_id, generation_group_id)
-
-        saved_agent_messages = [
-            add_message(
-                conversation_id=conversation_id,
-                role=agent_message["role"],
-                sender=agent_message.get("sender"),
-                content=agent_message["content"],
-                format=agent_message.get("format", "markdown"),
-                artifact_ids=artifact_ids,
-                generation_group_id=generation_group_id,
-                generation_index=generation_index,
-                replaces_message_ids=replaced_message_ids,
-                is_active_generation=True,
-                trace_events=trace_events,
-            )
-            for agent_message in result.messages
-        ]
-
-        return {
-            "run_id": result.run_id,
-            "status": result.status,
-            "messages": saved_agent_messages,
-            "artifacts": saved_artifacts,
-            "events": trace_events,
-        }
+            self.services.deactivate_generation_group(conversation_id, group)
+        return self.services.publish_result(result, generation_group_id=group)
 
     def _save_agent_creation_response(
         self,
@@ -171,7 +146,7 @@ class SendMessageUseCase:
             ],
             run_id=f"agent_creation_{saved_user_message['id']}",
         )
-        saved_message = add_message(
+        saved_message = self.services.add_message(
             conversation_id=conversation_id,
             role="agent",
             sender="orchestrator",
@@ -191,8 +166,8 @@ class SendMessageUseCase:
         }
 
 
-def build_chat_response(request: dict) -> dict:
-    return SendMessageUseCase().execute(request)
+def build_chat_response(request: dict, *, services: ChatServices) -> dict:
+    return SendMessageUseCase(services).execute(request)
 
 
 def _diagnostic_events(
@@ -214,7 +189,9 @@ def _diagnostic_events(
             "type": "message.received",
             "payload": {
                 "conversation_id": request.get("conversation_id"),
-                "message_length": len(str(request.get("message", {}).get("content", ""))),
+                "message_length": len(
+                    str(request.get("message", {}).get("content", ""))
+                ),
                 "regenerate": bool(request.get("regenerate_from_message_id")),
             },
             "created_at": now,
@@ -242,7 +219,9 @@ def _diagnostic_events(
             "payload": {
                 "count": len(attachments),
                 "image_count": image_count,
-                "total_bytes": sum(int(attachment.get("size") or 0) for attachment in attachments),
+                "total_bytes": sum(
+                    int(attachment.get("size") or 0) for attachment in attachments
+                ),
             },
             "created_at": now,
         },
@@ -289,27 +268,47 @@ def _describe_event(event: dict) -> tuple[str, str, str]:
     event_type = str(event.get("type") or "")
     payload = event.get("payload") or {}
     if event_type == "message.received":
-        return "收到用户消息", f"消息长度 {payload.get('message_length', 0)} 字符", "done"
+        return (
+            "收到用户消息",
+            f"消息长度 {payload.get('message_length', 0)} 字符",
+            "done",
+        )
     if event_type == "context.loaded":
         agents = ", ".join(payload.get("selected_agents") or [])
-        return "读取会话上下文", (
-            f"{payload.get('history_count', 0)} 条历史，"
-            f"{payload.get('pinned_count', 0)} 条长期上下文，"
-            f"模式 {payload.get('mode', '')}，Agent: {agents or 'auto'}"
-        ), "done"
+        return (
+            "读取会话上下文",
+            (
+                f"{payload.get('history_count', 0)} 条历史，"
+                f"{payload.get('pinned_count', 0)} 条长期上下文，"
+                f"模式 {payload.get('mode', '')}，Agent: {agents or 'auto'}"
+            ),
+            "done",
+        )
     if event_type == "model.selected":
-        return "选择模型", f"{payload.get('provider') or 'auto'} {payload.get('model_name') or ''}".strip(), "done"
+        return (
+            "选择模型",
+            f"{payload.get('provider') or 'auto'} {payload.get('model_name') or ''}".strip(),
+            "done",
+        )
     if event_type == "attachments.prepared":
-        return "准备附件", (
-            f"{payload.get('count', 0)} 个附件，"
-            f"{payload.get('image_count', 0)} 张图片，"
-            f"{payload.get('total_bytes', 0)} bytes"
-        ), "done"
+        return (
+            "准备附件",
+            (
+                f"{payload.get('count', 0)} 个附件，"
+                f"{payload.get('image_count', 0)} 张图片，"
+                f"{payload.get('total_bytes', 0)} bytes"
+            ),
+            "done",
+        )
     if event_type == "run.started":
         return "启动 Orchestrator", f"会话 {payload.get('conversation_id', '')}", "done"
     if event_type == "run.planned":
         steps = payload.get("steps") or []
-        return "完成任务拆解", f"{len(steps)} 个步骤：{payload.get('reason', '')}", "done"
+        return (
+            "完成任务拆解",
+            f"{len(steps)} 个步骤：{payload.get('reason', '')}",
+            "done",
+        )
     if event_type in {"agent.started", "agent.parallel_started"}:
         tools = ", ".join(payload.get("tools") or [])
         detail = str(payload.get("task") or "")
@@ -323,24 +322,44 @@ def _describe_event(event: dict) -> tuple[str, str, str]:
             detail = f"{detail}，错误：{payload.get('error')}"
         return f"Agent {payload.get('agent_id', '')} 完成", detail, status
     if event_type == "agent.skipped":
-        return f"跳过 Agent {payload.get('agent_id', '')}", str(payload.get("reason") or ""), "error"
+        return (
+            f"跳过 Agent {payload.get('agent_id', '')}",
+            str(payload.get("reason") or ""),
+            "error",
+        )
     if event_type == "tool.started":
         keys = ", ".join(payload.get("argument_keys") or [])
-        return f"调用工具 {payload.get('tool_id', '')}", f"参数：{keys or 'none'}", "done"
+        return (
+            f"调用工具 {payload.get('tool_id', '')}",
+            f"参数：{keys or 'none'}",
+            "done",
+        )
     if event_type == "tool.completed":
-        return f"工具 {payload.get('tool_id', '')} 完成", (
-            f"生成 {payload.get('artifact_type', '')}：{payload.get('artifact_title', '')}"
-        ), "done"
+        return (
+            f"工具 {payload.get('tool_id', '')} 完成",
+            (
+                f"生成 {payload.get('artifact_type', '')}：{payload.get('artifact_title', '')}"
+            ),
+            "done",
+        )
     if event_type == "tool.failed":
-        return f"工具 {payload.get('tool_id', '')} 失败", str(payload.get("error") or ""), "error"
+        return (
+            f"工具 {payload.get('tool_id', '')} 失败",
+            str(payload.get("error") or ""),
+            "error",
+        )
     if event_type == "run.completed":
         status = "error" if payload.get("status") == "failed" else "done"
-        return "汇总执行结果", (
-            f"状态 {payload.get('status', '')}，"
-            f"Agent {payload.get('agent_count', 0)} 个，"
-            f"产物 {payload.get('artifact_count', 0)} 个，"
-            f"冲突 {payload.get('conflict_count', 0)} 个"
-        ), status
+        return (
+            "汇总执行结果",
+            (
+                f"状态 {payload.get('status', '')}，"
+                f"Agent {payload.get('agent_count', 0)} 个，"
+                f"产物 {payload.get('artifact_count', 0)} 个，"
+                f"冲突 {payload.get('conflict_count', 0)} 个"
+            ),
+            status,
+        )
     return event_type or "执行事件", str(payload), "done"
 
 

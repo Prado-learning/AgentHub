@@ -32,34 +32,20 @@ from agenthub.tools.executor import build_default_tool_registry
 
 # Tools that are explicitly designed to be read-only / query / recognise.
 # If you add a new tool here, document *why* it can never write.
-_SHIPPED_L1: frozenset[str] = frozenset(
+# Proposal tools only return artifacts. Apply and deploy are separate reviewed actions.
+_SHIPPED_L1 = frozenset(
     {
         "file_reader_tool",
         "image_reader_tool",
         "document_preview_tool",
         "code_review_tool",
-    }
-)
-
-# Tools that generate / suggest / mutate artefacts inside the workspace.
-# These land at L2 so the harness can ask for user confirmation before
-# the artifact is "applied" downstream.
-_SHIPPED_L2: frozenset[str] = frozenset(
-    {
         "preview_tool",
         "ui_builder_tool",
-    }
-)
-
-# Tools that touch external systems (deploy, push, merge). They are
-# L3 by definition — even with a successful confirmation the harness
-# should never auto-apply; it emits an SOP and stops.
-_SHIPPED_L3: frozenset[str] = frozenset(
-    {
         "workflow_builder_tool",
-        "deploy_tool",
     }
 )
+_SHIPPED_L2 = frozenset()
+_SHIPPED_L3 = frozenset({"deploy_tool"})
 
 # Forward declarations: tools the mapping already classifies but whose
 # implementation has not landed yet. They get the right tier from day
@@ -153,21 +139,21 @@ def test_forward_declared_l3_tools_present_in_mapping() -> None:
         )
 
 
-def test_default_fallback_is_l1_readonly() -> None:
+def test_unknown_tools_require_approval() -> None:
     """``infer_authority`` must default to L1 so an unmapped tool fails
     closed (safer to ask for confirmation than to silently run)."""
 
-    assert infer_authority(["nonexistent_tool_xyz"]) is AuthorityTier.L1_READONLY
+    assert infer_authority(["nonexistent_tool_xyz"]) is AuthorityTier.L3_IRREVERSIBLE
 
 
 def test_infer_authority_picks_highest_tier() -> None:
     assert infer_authority(["file_reader_tool"]) is AuthorityTier.L1_READONLY
-    assert infer_authority(["preview_tool"]) is AuthorityTier.L2_REVERSIBLE
+    assert infer_authority(["preview_tool"]) is AuthorityTier.L1_READONLY
     assert infer_authority(["deploy_tool"]) is AuthorityTier.L3_IRREVERSIBLE
     # Mixed inputs collapse to the highest tier present.
     assert (
         infer_authority(["file_reader_tool", "preview_tool"])
-        is AuthorityTier.L2_REVERSIBLE
+        is AuthorityTier.L1_READONLY
     )
     assert (
         infer_authority(["file_reader_tool", "deploy_tool"])

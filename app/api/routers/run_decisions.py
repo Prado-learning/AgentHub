@@ -1,27 +1,3 @@
-"""REST endpoints for L2 / L3 user decisions and per-run debug trace.
-
-The decision endpoints back the front-end approval queue:
-
-* ``GET /runs/{run_id}/pending-confirmations`` — refresh the queue for
-  one run.
-* ``GET /runs/pending-confirmations`` — refresh the queue for every run
-  (used by a global banner).
-* ``POST /runs/{run_id}/steps/{step_id}/confirm`` — flip to ``applied``.
-* ``POST /runs/{run_id}/steps/{step_id}/decline`` — flip to ``rejected``.
-
-The debug-trace endpoint exposes the persisted :class:`RunResult`
-snapshot so the UI can replay every stage:
-
-* ``GET /runs/{run_id}/debug-trace`` — return every stage the harness
-  recorded for that run.
-
-All endpoints are backed by JSON stores in
-:mod:`app.api.services`; the harness writes ``upsert_pending`` records
-whenever a step requests confirmation, and
-:func:`chat_service.build_chat_response` saves the run snapshot before
-returning the chat payload.
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
@@ -42,11 +18,13 @@ router = APIRouter(tags=["run-decisions"])
 
 
 class ConfirmRequest(BaseModel):
+    fingerprint: str = Field(min_length=64, max_length=64)
     actor: str | None = None
     note: str | None = None
 
 
 class DeclineRequest(BaseModel):
+    fingerprint: str = Field(min_length=64, max_length=64)
     actor: str | None = None
     reason: str | None = Field(default=None, max_length=512)
 
@@ -73,58 +51,61 @@ def read_all_pending_confirmations() -> dict:
 
 @router.get("/runs/{run_id}/pending-confirmations")
 def read_pending_for_run(run_id: str) -> dict:
-    decisions = [d for d in list_decisions_for_run(run_id) if d.get("status") == "pending"]
+    decisions = [
+        d for d in list_decisions_for_run(run_id) if d.get("status") == "pending"
+    ]
     return {"run_id": run_id, "pending_confirmations": decisions}
 
 
-@router.post("/runs/{run_id}/pending-confirmations")
-def register_pending(run_id: str, request: UpsertRequest) -> dict:
-    """Idempotently register a pending confirmation.
+def _decide(run_id: str, step_id: str, payload, approve: bool):
+    from app.api.services.execution_service import lock_for, resume_run
 
-    Normally the harness does this on every L2/L3 success. This endpoint
-    exists so a caller who replays an older trace can rebuild the queue
-    without re-running the plan.
-    """
-
-    record = upsert_pending(
-        run_id=run_id,
-        step_id=request.step_id,
-        agent_id=request.agent_id,
-        authority=request.authority,
-        task=request.task,
-        artifact_count=request.artifact_count,
-    )
-    return {"decision": record}
+    with lock_for(run_id):
+        snapshot = run_store.load_run_result(run_id)
+        decision = get_decision(run_id, step_id)
+        if snapshot is None or decision is None:
+            raise HTTPException(status_code=404, detail="Run or decision not found")
+        if decision.get("fingerprint") != payload.fingerprint:
+            raise HTTPException(
+                status_code=409, detail="Action changed; refresh before deciding"
+            )
+        if decision["status"] in {"applied", "failed", "rejected"}:
+            return {"decision": decision}
+        if snapshot.get("status") != "waiting_approval":
+            raise HTTPException(
+                status_code=409, detail="Run is not waiting for approval"
+            )
+        try:
+            if approve:
+                confirm_step(
+                    run_id=run_id,
+                    step_id=step_id,
+                    actor=payload.actor,
+                    note=payload.note,
+                    fingerprint=payload.fingerprint,
+                )
+            else:
+                decline_step(
+                    run_id=run_id,
+                    step_id=step_id,
+                    actor=payload.actor,
+                    reason=payload.reason,
+                    fingerprint=payload.fingerprint,
+                )
+            response = resume_run(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"decision": get_decision(run_id, step_id), "response": response}
 
 
 @router.post("/runs/{run_id}/steps/{step_id}/confirm")
-def confirm(run_id: str, step_id: str, request: ConfirmRequest | None = None) -> dict:
-    payload = request or ConfirmRequest()
-    try:
-        decision = confirm_step(
-            run_id=run_id,
-            step_id=step_id,
-            actor=payload.actor,
-            note=payload.note,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"decision": decision}
+def confirm(run_id: str, step_id: str, request: ConfirmRequest) -> dict:
+    return _decide(run_id, step_id, request, True)
 
 
 @router.post("/runs/{run_id}/steps/{step_id}/decline")
-def decline(run_id: str, step_id: str, request: DeclineRequest | None = None) -> dict:
-    payload = request or DeclineRequest()
-    try:
-        decision = decline_step(
-            run_id=run_id,
-            step_id=step_id,
-            actor=payload.actor,
-            reason=payload.reason,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"decision": decision}
+def decline(run_id: str, step_id: str, request: DeclineRequest) -> dict:
+    return _decide(run_id, step_id, request, False)
 
 
 @router.get("/runs/{run_id}/steps/{step_id}/decision")
@@ -159,7 +140,53 @@ def read_debug_trace(run_id: str) -> dict:
 
 
 @router.get("/runs")
-def list_runs() -> dict:
-    """List every run id currently on disk (sorted by run_id)."""
+def list_runs(conversation_id: str | None = None) -> dict:
+    runs = [run_store.load_run_result(key) for key in run_store.list_run_ids()]
+    runs = [
+        r
+        for r in runs
+        if r and (not conversation_id or r.get("conversation_id") == conversation_id)
+    ]
+    return {
+        "run_ids": [r["run_id"] for r in runs],
+        "runs": [
+            {
+                key: r.get(key)
+                for key in ("run_id", "conversation_id", "status", "updated_at")
+            }
+            for r in runs
+        ],
+    }
 
-    return {"run_ids": run_store.list_run_ids()}
+
+@router.get("/runs/{run_id}")
+def read_run(run_id: str, after: int = 0) -> dict:
+    try:
+        snapshot = run_store.load_run_result(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if (
+        snapshot.get("raw_messages")
+        and not snapshot.get("response")
+        and snapshot.get("status")
+        in {"success", "failed", "partial_success", "waiting_approval"}
+    ):
+        snapshot["status"] = "running"
+    events = snapshot.get("events", [])
+    return {
+        key: snapshot.get(key)
+        for key in ("run_id", "status", "response", "error", "updated_at")
+    } | {"events": events[max(0, after) :], "cursor": len(events)}
+
+
+@router.post("/runs/{run_id}/cancel")
+def cancel(run_id: str) -> dict:
+    from app.api.services.execution_service import cancel_run
+
+    try:
+        snapshot = cancel_run(run_id)
+        return {"run_id": run_id, "status": snapshot["status"]}
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc

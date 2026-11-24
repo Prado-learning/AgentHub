@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 
@@ -15,10 +15,11 @@ class PlanStep:
     can_run_parallel: bool = True
     authority: AuthorityTier = AuthorityTier.L1_READONLY
     can_short_circuit: bool = False
+    kind: str = "agent"
+    arguments: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class Plan:
     steps: list[PlanStep]
     reason: str
-

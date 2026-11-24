@@ -19,6 +19,8 @@ class ClaudeCodeAdapter:
         self.capabilities = capabilities or ["code", "review", "refactor"]
         self.skills = skills or []
 
+    side_effecting = True
+
     def run(self, task: AgentTask, context: RunContext) -> AgentResult:
         return run_cli_agent(
             agent_id=self.id,

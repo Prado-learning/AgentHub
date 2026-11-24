@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+from agenthub.runtime.result_parser import artifacts_from_text, upstream_context
 
 import os
 
@@ -24,7 +26,9 @@ class CodexAdapter:
         self.name = name or "Codex"
         self.capabilities = capabilities or ["code", "review", "refactor"]
         self.skills = skills or []
-        resolved_model = model if model and model != "mock" else os.environ.get("CODEX_MODEL", model)
+        resolved_model = (
+            model if model and model != "mock" else os.environ.get("CODEX_MODEL", model)
+        )
         self.model = resolved_model
         self.provider = OpenAICompatibleProvider(
             model=resolved_model,
@@ -33,7 +37,12 @@ class CodexAdapter:
         )
 
     def run(self, task: AgentTask, context: RunContext) -> AgentResult:
-        default_mode = "llm" if os.environ.get("ENABLE_REAL_LLM", "").lower() in {"1", "true", "yes", "on"} else "mock"
+        default_mode = (
+            "llm"
+            if os.environ.get("ENABLE_REAL_LLM", "").lower()
+            in {"1", "true", "yes", "on"}
+            else "mock"
+        )
         mode = os.environ.get("CODEX_MODE", default_mode).strip().lower()
         if mode in {"cli", "process", "codex_cli"}:
             return run_cli_agent(
@@ -96,7 +105,9 @@ class CodexAdapter:
                 str(attachment.get("mime_type", "")).startswith("image/")
                 for attachment in context.attachments or []
             ):
-                content = self.provider.complete_with_attachments(prompt, context.attachments or [])
+                content = self.provider.complete_with_attachments(
+                    prompt, context.attachments or []
+                )
             else:
                 content = self.provider.complete(prompt)
         except Exception as exc:
@@ -124,21 +135,22 @@ class CodexAdapter:
                     "format": "markdown",
                 }
             ],
-            artifacts=[
-                {
-                    "id": "codex_code",
-                    "type": "code",
-                    "title": "CodexOutput.tsx",
-                    "language": "tsx",
-                    "file_path": "CodexOutput.tsx",
-                    "content": content,
-                }
-            ],
+            artifacts=artifacts_from_text(self.id, content),
         )
+
+    @property
+    def side_effecting(self) -> bool:
+        return os.environ.get("CODEX_MODE", "llm").lower() in {
+            "cli",
+            "process",
+            "codex_cli",
+        }
 
     def _build_prompt(self, task: AgentTask, context: RunContext) -> str:
         history = format_messages_for_prompt(context.history, limit=8, total_limit=4200)
-        skill_text = "\n\n".join(self.skills) if self.skills else "No extra skills configured."
+        skill_text = (
+            "\n\n".join(self.skills) if self.skills else "No extra skills configured."
+        )
         return (
             f"You are {self.name}, a coding agent inside AgentHub.\n"
             f"Conversation mode: {context.mode}\n"
@@ -149,6 +161,7 @@ class CodexAdapter:
             f"Conversation summary:\n{self._format_summary(context)}\n\n"
             f"Current attachments:\n{self._format_attachments(context)}\n\n"
             f"Recent history:\n{history}\n\n"
+            f"Upstream step artifacts (use exact content):\n{upstream_context(context)}\n\n"
             f"Task:\n{task.instruction}\n\n"
             "Return concise markdown. Use fenced code blocks for code."
         )
@@ -176,7 +189,9 @@ class CodexAdapter:
     def _format_summary(self, context: RunContext) -> str:
         if not context.conversation_summary:
             return "No long-context summary."
-        return str(context.conversation_summary.get("content") or "No long-context summary.")
+        return str(
+            context.conversation_summary.get("content") or "No long-context summary."
+        )
 
     def _format_attachments(self, context: RunContext) -> str:
         if not context.attachments:

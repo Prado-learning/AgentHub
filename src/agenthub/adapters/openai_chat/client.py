@@ -10,6 +10,13 @@ from urllib.error import HTTPError, URLError
 from urllib import request
 
 
+from agenthub.harness.control import (
+    check_cancelled,
+    record_model_call,
+    record_usage,
+    interruptible_wait,
+)
+
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -27,7 +34,9 @@ class OpenAICompatibleProvider:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL", "")).rstrip("/")
         self.timeout = timeout or self._env_timeout()
-        self.max_retries = max_retries if max_retries is not None else self._env_max_retries()
+        self.max_retries = (
+            max_retries if max_retries is not None else self._env_max_retries()
+        )
         self.retry_base_seconds = (
             retry_base_seconds
             if retry_base_seconds is not None
@@ -35,7 +44,14 @@ class OpenAICompatibleProvider:
         )
 
     def complete(self, prompt: str) -> str:
-        if not self.api_key or not self.base_url or self.model == "mock":
+        if self.model == "mock" and os.environ.get("ENABLE_REAL_LLM", "").lower() in {
+            "true",
+            "1",
+            "yes",
+            "on",
+        }:
+            raise RuntimeError("Real LLM is enabled but no model name is configured")
+        if self.model == "mock":
             return f"[{self.model}] mock completion for: {prompt}"
 
         return self._post_chat_completion(
@@ -51,7 +67,14 @@ class OpenAICompatibleProvider:
         image_parts = self._image_parts(attachments)
         if not image_parts:
             return self.complete(prompt)
-        if not self.api_key or not self.base_url or self.model == "mock":
+        if self.model == "mock" and os.environ.get("ENABLE_REAL_LLM", "").lower() in {
+            "true",
+            "1",
+            "yes",
+            "on",
+        }:
+            raise RuntimeError("Real LLM is enabled but no model name is configured")
+        if self.model == "mock":
             return f"[{self.model}] mock vision completion for: {prompt}"
 
         return self._post_chat_completion(
@@ -67,15 +90,53 @@ class OpenAICompatibleProvider:
         )
 
     def _post_chat_completion(self, messages: list[dict]) -> str:
+        from agenthub.runtime.agent_runtime import current_tools, call_tool
+
+        session = current_tools()
+        transcript = list(messages)
+        for turn in range((session.max_rounds if session else 0) + 1):
+            message = self._request_message(
+                transcript, session.schemas if session else None
+            )
+            calls = message.get("tool_calls") or []
+            if not calls:
+                return str(message.get("content") or "")
+            if session is None or turn >= session.max_rounds:
+                raise RuntimeError("Model tool-call round limit reached")
+            transcript.append(message)
+            for call in calls:
+                function = call.get("function") or {}
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                    if not isinstance(arguments, dict):
+                        raise ValueError("Tool arguments must be an object")
+                    output = call_tool(session, function.get("name"), arguments)
+                except (ValueError, KeyError, PermissionError) as exc:
+                    output = {"error": str(exc)}
+                transcript.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": json.dumps(output, ensure_ascii=False)[:50000],
+                    }
+                )
+        raise RuntimeError("Agent did not finish")
+
+    def _request_message(self, messages: list[dict], tools=None) -> dict:
+        if not self.api_key or not self.base_url:
+            raise RuntimeError("Real model requires an API key and base URL")
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": 0.2,
         }
+        if tools:
+            payload["tools"] = tools
         body = json.dumps(payload).encode("utf-8")
         attempts = self.max_retries + 1
 
         for attempt in range(1, attempts + 1):
+            record_model_call()
             http_request = request.Request(
                 f"{self.base_url}/chat/completions",
                 data=body,
@@ -89,7 +150,9 @@ class OpenAICompatibleProvider:
                 with request.urlopen(http_request, timeout=self.timeout) as response:
                     response_body = response.read().decode("utf-8")
                 data = json.loads(response_body)
-                return data["choices"][0]["message"]["content"]
+                check_cancelled()
+                record_usage(data.get("usage") or {})
+                return data["choices"][0]["message"]
             except HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
                 if exc.code not in RETRYABLE_STATUS_CODES or attempt == attempts:
@@ -110,7 +173,7 @@ class OpenAICompatibleProvider:
                     raise RuntimeError(
                         f"LLM API request failed after {attempt} attempt(s): {exc.reason}"
                     ) from exc
-            time.sleep(self.retry_base_seconds * (2 ** (attempt - 1)))
+            interruptible_wait(self.retry_base_seconds * (2 ** (attempt - 1)))
 
         raise RuntimeError("LLM API call did not produce a response")
 
@@ -151,5 +214,7 @@ class OpenAICompatibleProvider:
         for message in messages:
             content = message.get("content")
             if isinstance(content, list):
-                count += len([part for part in content if part.get("type") == "image_url"])
+                count += len(
+                    [part for part in content if part.get("type") == "image_url"]
+                )
         return count

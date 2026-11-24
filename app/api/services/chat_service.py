@@ -1,45 +1,36 @@
-"""Thin wrapper around the chat use case.
+"""Wire application ports to HTTP persistence/services."""
 
-Adds a single cross-cutting concern that doesn't belong in the
-application layer: persist the run snapshot so the front end can fetch
-``/runs/{run_id}/debug-trace`` after the chat response is gone.
-"""
-
-from __future__ import annotations
-
-import logging
-
-from agenthub.application.chat.send_message import (
-    SendMessageUseCase,
-    build_chat_response as _build_chat_response,
+from uuid import uuid4
+from agenthub.application.chat.send_message import ChatServices, SendMessageUseCase
+from app.api.services import conversation_service as conversations
+from app.api.services import (
+    attachment_service,
+    artifact_service,
+    agent_creation_service,
+    context_summary_service,
+    memory_service,
 )
-from agenthub.domain.run import RunResult
-
-from app.api.services import run_store
-
-
-_log = logging.getLogger(__name__)
-
-
-def _persist_run_result(result: RunResult) -> None:
-    try:
-        run_store.save_run_result(result.run_id, result)
-    except Exception:  # pragma: no cover - defensive, never break chat
-        _log.exception("failed to persist run snapshot for %s", result.run_id)
+from app.api.services import execution_service, run_store
 
 
 def build_chat_response(request: dict) -> dict:
-    """Run the chat use case and persist its ``RunResult`` for later replay.
+    run_id = request.get("_run_id") or f"run_{uuid4().hex[:12]}"
+    services = ChatServices(
+        get_conversation=conversations.get_conversation,
+        add_message=conversations.add_message,
+        list_messages=conversations.list_messages,
+        list_pinned_messages=conversations.list_pinned_messages,
+        get_attachments=attachment_service.get_attachment_records_by_ids,
+        handle_agent_creation=agent_creation_service.handle_agent_creation_message,
+        get_summary=context_summary_service.get_or_update_summary,
+        list_memories=memory_service.list_memories,
+        list_artifacts=artifact_service.list_artifacts,
+        execute_context=execution_service.execute_context,
+        publish_result=execution_service.publish_result,
+        deactivate_generation_group=conversations.deactivate_generation_group,
+    )
+    with execution_service.lock_for(run_id):
+        return SendMessageUseCase(services).execute({**request, "_run_id": run_id})
 
-    Persistence is best-effort: a failing save never bubbles up and
-    breaks the chat response.
-    """
 
-    return SendMessageUseCase().execute(request, on_run_result=_persist_run_result)
-
-
-def build_mock_chat_response(request: dict) -> dict:
-    return _build_chat_response(request)
-
-
-__all__ = ["SendMessageUseCase", "build_chat_response", "build_mock_chat_response"]
+build_mock_chat_response = build_chat_response

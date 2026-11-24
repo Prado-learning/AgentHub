@@ -6,13 +6,14 @@ import re
 from typing import Any
 
 from agenthub.domain.authority import AuthorityTier
+from agenthub.harness.control import RunCancelled, BudgetExceeded
 from agenthub.domain.plan import Plan, PlanStep
 from agenthub.domain.run import RunContext
 from agenthub.infrastructure.config.env import env_flag, load_env_file
 from agenthub.adapters.openai_chat.client import OpenAICompatibleProvider
 from agenthub.runtime.prompt_builder import format_messages_for_prompt
 from agenthub.tools.executor import build_default_tool_registry
-from agenthub.application.agents.runtime_profile import (
+from agenthub.agent.runtime_profile import (
     AgentRuntimeProfile,
     load_agent_runtime_profiles,
 )
@@ -30,13 +31,13 @@ _TOOL_AUTHORITY: dict[str, AuthorityTier] = {
     "document_preview_tool": AuthorityTier.L1_READONLY,
     "code_review_tool": AuthorityTier.L1_READONLY,
     # L2 — reversible / generate / write suggestion (human confirms before apply)
-    "preview_tool": AuthorityTier.L2_REVERSIBLE,
-    "ui_builder_tool": AuthorityTier.L2_REVERSIBLE,
+    "preview_tool": AuthorityTier.L1_READONLY,
+    "ui_builder_tool": AuthorityTier.L1_READONLY,
     "file_writer_tool": AuthorityTier.L2_REVERSIBLE,
     "reply_template_tool": AuthorityTier.L2_REVERSIBLE,
     "create_artifact_tool": AuthorityTier.L2_REVERSIBLE,
     # L3 — irreversible / deploy / execute workflow (SOP only)
-    "workflow_builder_tool": AuthorityTier.L3_IRREVERSIBLE,
+    "workflow_builder_tool": AuthorityTier.L1_READONLY,
     "deploy_tool": AuthorityTier.L3_IRREVERSIBLE,
     "push_branch_tool": AuthorityTier.L3_IRREVERSIBLE,
     "merge_request_tool": AuthorityTier.L3_IRREVERSIBLE,
@@ -54,7 +55,7 @@ def infer_authority(tools: list[str]) -> AuthorityTier:
 
     tier = AuthorityTier.L1_READONLY
     for tool_id in tools:
-        candidate = _TOOL_AUTHORITY.get(tool_id, AuthorityTier.L1_READONLY)
+        candidate = _TOOL_AUTHORITY.get(tool_id, AuthorityTier.L3_IRREVERSIBLE)
         if candidate.value > tier.value:
             tier = candidate
     return tier
@@ -75,15 +76,21 @@ class Orchestrator:
         agent_profiles: dict[str, AgentRuntimeProfile] | None = None,
     ) -> None:
         self.agent_profiles = agent_profiles or load_agent_runtime_profiles()
-        self.available_agent_ids = available_agent_ids or list(self.agent_profiles) or [
-            "orchestrator",
-            "codex",
-            "ui_builder",
-            "code_reviewer",
-            "vision_agent",
-            "file_analyst",
-        ]
-        self.available_tool_ids = available_tool_ids or build_default_tool_registry().list_ids()
+        self.available_agent_ids = (
+            available_agent_ids
+            or list(self.agent_profiles)
+            or [
+                "orchestrator",
+                "codex",
+                "ui_builder",
+                "code_reviewer",
+                "vision_agent",
+                "file_analyst",
+            ]
+        )
+        self.available_tool_ids = (
+            available_tool_ids or build_default_tool_registry().list_ids()
+        )
         self.planner_provider = planner_provider
 
     def plan(self, context: RunContext) -> Plan:
@@ -116,6 +123,7 @@ class Orchestrator:
                         "step_1",
                         context.selected_agents[0],
                         message,
+                        explicit_tools=self._single_tools(context),
                         can_short_circuit=True,
                     )
                 ],
@@ -126,10 +134,44 @@ class Orchestrator:
         if llm_plan is not None:
             return llm_plan
 
-        return Plan(steps=self._build_auto_steps(context), reason="rule based auto dispatch")
+        return Plan(
+            steps=self._build_auto_steps(context), reason="rule based auto dispatch"
+        )
 
-    def _plan_explicit_mentions(self, message: str, mentions: dict[str, list[str]]) -> Plan:
-        agents = mentions["agents"] or self._agents_for_tools(mentions["tools"]) or ["orchestrator"]
+    def _single_tools(self, context: RunContext) -> list[str]:
+        profile = self.agent_profiles.get(context.selected_agents[0])
+        allowed = set(profile.tools if profile else [])
+        wanted = []
+        message = context.message.lower()
+        if re.search(r"\b(deploy|publish)\b|部署|发布|上线", message):
+            wanted.append("deploy_tool")
+        if re.search(r"\bpreview\b|预览", message):
+            wanted.append("preview_tool")
+        if re.search(r"\breview\b|审查|审阅", message):
+            wanted.append("code_review_tool")
+        if context.attachments:
+            if any(
+                str(a.get("mime_type", "")).startswith("image/")
+                for a in context.attachments
+            ):
+                wanted.append("image_reader_tool")
+            if any(
+                not str(a.get("mime_type", "")).startswith("image/")
+                for a in context.attachments
+            ):
+                wanted.extend(["file_reader_tool", "document_preview_tool"])
+        return self._enabled_tools(
+            [t for t in wanted if t in allowed], context.tool_preferences or {}
+        )
+
+    def _plan_explicit_mentions(
+        self, message: str, mentions: dict[str, list[str]]
+    ) -> Plan:
+        agents = (
+            mentions["agents"]
+            or self._agents_for_tools(mentions["tools"])
+            or ["orchestrator"]
+        )
         steps = [
             self._build_step(
                 f"step_{index}",
@@ -196,12 +238,18 @@ class Orchestrator:
                     "step_image_reader",
                     "vision_agent",
                     message,
-                    explicit_tools=self._enabled_tools(["image_reader_tool"], preferences),
+                    explicit_tools=self._enabled_tools(
+                        ["image_reader_tool"], preferences
+                    ),
                 )
             )
 
         if "file_task" in intents and "image_task" not in intents:
-            agent_id = "file_analyst" if "file_analyst" in self.available_agent_ids else "orchestrator"
+            agent_id = (
+                "file_analyst"
+                if "file_analyst" in self.available_agent_ids
+                else "orchestrator"
+            )
             steps.append(
                 self._build_step(
                     "step_file_reader",
@@ -244,7 +292,9 @@ class Orchestrator:
                     "step_code_reviewer",
                     "code_reviewer",
                     message,
-                    explicit_tools=self._enabled_tools(["code_review_tool"], preferences),
+                    explicit_tools=self._enabled_tools(
+                        ["code_review_tool"], preferences
+                    ),
                     depends_on=depends_on,
                     can_run_parallel=not depends_on,
                 )
@@ -261,7 +311,11 @@ class Orchestrator:
             )
 
         if "deploy" in intents:
-            depends_on = [step.id for step in steps if step.id.startswith("step_ui") or step.id == "step_preview"]
+            depends_on = [
+                step.id
+                for step in steps
+                if step.id.startswith("step_ui") or step.id == "step_preview"
+            ]
             steps.append(
                 self._build_step(
                     "step_deploy",
@@ -293,7 +347,13 @@ class Orchestrator:
             model="mock" if env_flag("ENABLE_LLM_PLANNER_MOCK") else planner_model
         )
         try:
-            return self._plan_from_payload(self._extract_json_object(provider.complete(self._planner_prompt(context))))
+            return self._plan_from_payload(
+                self._extract_json_object(
+                    provider.complete(self._planner_prompt(context))
+                )
+            )
+        except (RunCancelled, BudgetExceeded):
+            raise
         except Exception:
             return None
 
@@ -344,16 +404,14 @@ class Orchestrator:
                 continue
             step_id = str(item.get("id") or f"step_{index}").strip()
             if not step_id or step_id in seen_step_ids:
-                step_id = f"step_{index}"
+                raise ValueError("Planner returned duplicate or empty step id")
             tools = [
                 str(tool_id)
                 for tool_id in item.get("tools", [])
                 if str(tool_id) in self.available_tool_ids
             ]
             depends_on = [
-                str(dep)
-                for dep in item.get("depends_on", [])
-                if str(dep) in seen_step_ids
+                str(dep) for dep in item.get("depends_on", []) if str(dep).strip()
             ]
             steps.append(
                 PlanStep(
@@ -363,12 +421,16 @@ class Orchestrator:
                     tools=tools,
                     depends_on=depends_on,
                     can_run_parallel=bool(item.get("can_run_parallel", True)),
+                    authority=infer_authority(tools),
                 )
             )
             seen_step_ids.add(step_id)
 
         if not steps:
             raise ValueError("Planner returned no usable steps")
+        known_ids = {step.id for step in steps}
+        if any(dep not in known_ids for step in steps for dep in step.depends_on):
+            raise ValueError("Planner returned an unknown dependency")
         self._validate_no_dependency_cycles(steps)
         return Plan(steps=steps, reason=str(payload.get("reason") or "llm planner"))
 
@@ -407,8 +469,10 @@ class Orchestrator:
         can_run_parallel: bool = True,
         can_short_circuit: bool = False,
     ) -> PlanStep:
-        tools = explicit_tools if explicit_tools is not None else self._tools_for(agent_id)
-        effective_tools = [tool_id for tool_id in tools if tool_id in self.available_tool_ids]
+        tools = explicit_tools if explicit_tools is not None else []
+        effective_tools = [
+            tool_id for tool_id in tools if tool_id in self.available_tool_ids
+        ]
         return PlanStep(
             id=step_id,
             agent_id=agent_id,
@@ -426,7 +490,9 @@ class Orchestrator:
             agent_id
             for agent_id in self.available_agent_ids
             if agent_id in mentioned and agent_id != "orchestrator"
-        ] or [agent_id for agent_id in self.available_agent_ids if agent_id in mentioned]
+        ] or [
+            agent_id for agent_id in self.available_agent_ids if agent_id in mentioned
+        ]
         tools = [tool_id for tool_id in self.available_tool_ids if tool_id in mentioned]
         return {"agents": agents, "tools": tools}
 
@@ -458,11 +524,15 @@ class Orchestrator:
             intents.add("preview")
         if self._contains_any(lowered, ["file", "upload", "读取", "文件"]):
             intents.add("file_task")
-        if self._contains_any(lowered, ["image", "picture", "screenshot", "photo", "图片", "截图"]):
+        if self._contains_any(
+            lowered, ["image", "picture", "screenshot", "photo", "图片", "截图"]
+        ):
             intents.add("image_task")
         if self._contains_any(lowered, ["deploy", "部署", "发布"]):
             intents.add("deploy")
-        if self._contains_any(lowered, ["workflow", "pipeline", "flow", "工作流", "流程"]):
+        if self._contains_any(
+            lowered, ["workflow", "pipeline", "flow", "工作流", "流程"]
+        ):
             intents.add("workflow_generation")
         if "ui_generation" in intents and "code_review" not in intents:
             intents.add("code_review")
@@ -493,4 +563,6 @@ class Orchestrator:
             "image_reader_tool": preferences.get("image") is False,
             "preview_tool": preferences.get("preview") is False,
         }
-        return [tool_id for tool_id in tool_ids if not disabled_by_tool.get(tool_id, False)]
+        return [
+            tool_id for tool_id in tool_ids if not disabled_by_tool.get(tool_id, False)
+        ]

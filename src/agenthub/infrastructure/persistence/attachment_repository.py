@@ -1,4 +1,4 @@
-﻿from app.api.services.attachment_service import (
+from agenthub.infrastructure.persistence.attachments import (
     get_attachment,
     get_attachment_record,
     get_attachment_records_by_ids,
@@ -13,4 +13,3 @@ __all__ = [
     "list_attachments",
     "save_attachment",
 ]
-

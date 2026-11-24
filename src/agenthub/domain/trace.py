@@ -6,7 +6,7 @@ with :class:`agenthub.domain.run.RunResult.debug_trace` so the UI can
 replay every stage without re-running the model.
 
 This is a pure domain type: recording and aggregation live in
-``agenthub.tracing``; the data shape lives here.
+``agenthub.harness.tracing``; the data shape lives here.
 """
 
 from __future__ import annotations

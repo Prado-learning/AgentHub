@@ -86,8 +86,22 @@ def test_deploy_intent_creates_deployment_artifact(tmp_path: Path, monkeypatch) 
     )
 
     assert response.status_code == 200
+    pending = response.json()
+    assert pending["status"] == "waiting_approval"
+    assert not any(a["type"] == "deployment" for a in pending["artifacts"])
+    decision = client.get(f"/runs/{pending['run_id']}/pending-confirmations").json()[
+        "pending_confirmations"
+    ][0]
+    response = client.post(
+        f"/runs/{pending['run_id']}/steps/{decision['step_id']}/confirm",
+        json={"fingerprint": decision["fingerprint"]},
+    )
+    assert response.status_code == 200, response.text
+    response_data = response.json()["response"]
     deployment = next(
-        artifact for artifact in response.json()["artifacts"] if artifact["type"] == "deployment"
+        artifact
+        for artifact in response_data["artifacts"]
+        if artifact["type"] == "deployment"
     )
     assert deployment["status"] == "success"
     assert deployment["preview_url"].startswith("/deployments/")
@@ -115,6 +129,7 @@ def test_structured_diff_and_artifact_versions(tmp_path: Path, monkeypatch) -> N
             },
             {
                 "id": "diff_1",
+                "conversation_id": "conv_demo",
                 "type": "diff",
                 "title": "Patch",
                 "content": (
@@ -142,7 +157,9 @@ def test_structured_diff_and_artifact_versions(tmp_path: Path, monkeypatch) -> N
     assert [line["type"] for line in lines] == ["remove", "add"]
 
 
-def test_partial_quote_regenerate_and_document_preview(tmp_path: Path, monkeypatch) -> None:
+def test_partial_quote_regenerate_and_document_preview(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setenv("ENABLE_REAL_LLM", "false")
     monkeypatch.setattr(
         conversation_service,
@@ -219,9 +236,12 @@ def test_partial_quote_regenerate_and_document_preview(tmp_path: Path, monkeypat
     agent_versions = [
         message
         for message in messages
-        if message["role"] == "agent" and message.get("generation_group_id") == user_message["id"]
+        if message["role"] == "agent"
+        and message.get("generation_group_id") == user_message["id"]
     ]
-    assert any(message.get("is_active_generation") is False for message in agent_versions)
+    assert any(
+        message.get("is_active_generation") is False for message in agent_versions
+    )
     assert max(message.get("generation_index") or 0 for message in agent_versions) >= 2
 
 
@@ -300,7 +320,9 @@ def test_workflow_artifact_can_be_created_and_run(tmp_path: Path, monkeypatch) -
     assert run_response.status_code == 200
     data = run_response.json()
     assert data["status"] in {"success", "partial_success"}
-    assert any(artifact["type"] == "workflow" for artifact in created.json()["artifacts"])
+    assert any(
+        artifact["type"] == "workflow" for artifact in created.json()["artifacts"]
+    )
     assert any(artifact["type"] == "code" for artifact in data["artifacts"])
     assert any(artifact["type"] == "preview" for artifact in data["artifacts"])
     assert any(event["type"] == "run.completed" for event in data["events"])

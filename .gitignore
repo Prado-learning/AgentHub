@@ -25,3 +25,10 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local verification outputs
+.test-results.txt
+.ruff_cache/
+
+# Local coding-agent tooling data
+.zcode/

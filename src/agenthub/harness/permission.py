@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agenthub.application.agents.runtime_profile import AgentRuntimeProfile
+from agenthub.agent.runtime_profile import AgentRuntimeProfile
 from agenthub.policies import ToolPolicy
 
 

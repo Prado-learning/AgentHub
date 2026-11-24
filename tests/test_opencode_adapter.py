@@ -15,6 +15,7 @@ def _context() -> RunContext:
         history=[],
         selected_agents=["opencode"],
         mode="single",
+        workspace_dir=str(Path(__import__("os").environ["AGENTHUB_DATA_DIR"]) / "cli"),
     )
 
 
@@ -33,7 +34,9 @@ def test_opencode_adapter_errors_when_command_not_configured(monkeypatch) -> Non
     monkeypatch.delenv("OPENCODE_COMMAND", raising=False)
     adapter = OpenCodeAdapter()
 
-    result = adapter.run(AgentTask(agent_id="opencode", instruction="Build"), _context())
+    result = adapter.run(
+        AgentTask(agent_id="opencode", instruction="Build"), _context()
+    )
 
     assert result.status == "error"
     assert "OPENCODE_COMMAND is not configured" in str(result.error)
@@ -43,7 +46,9 @@ def test_opencode_adapter_errors_when_command_missing(monkeypatch) -> None:
     monkeypatch.setenv("OPENCODE_COMMAND", "definitely-not-a-real-command-xyz")
     adapter = OpenCodeAdapter()
 
-    result = adapter.run(AgentTask(agent_id="opencode", instruction="Build"), _context())
+    result = adapter.run(
+        AgentTask(agent_id="opencode", instruction="Build"), _context()
+    )
 
     assert result.status == "error"
     assert "failed to start" in result.messages[0]["content"]
@@ -57,7 +62,9 @@ def test_opencode_adapter_extracts_code_artifact_from_cli_output(
     monkeypatch.setenv("OPENCODE_COMMAND", f"{sys.executable} {script}")
     adapter = OpenCodeAdapter()
 
-    result = adapter.run(AgentTask(agent_id="opencode", instruction="Build"), _context())
+    result = adapter.run(
+        AgentTask(agent_id="opencode", instruction="Build"), _context()
+    )
 
     assert result.status == "success"
     assert result.artifacts[0]["type"] == "code"

@@ -6,7 +6,7 @@ from app.api.services.agent_service import (
     delete_custom_agent,
     update_custom_agent,
 )
-from agenthub.application.agents.catalog import AgentCatalog
+from agenthub.agent.catalog import AgentCatalog
 from agenthub.application.tools.catalog import ToolCatalog
 from agenthub.infrastructure.config.models import list_model_options
 

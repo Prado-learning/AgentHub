@@ -1,10 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from pathlib import Path
 
 
 def load_env_file(path: str | Path = ".env", override: bool = False) -> None:
+    if os.environ.get("AGENTHUB_SKIP_ENV_FILE") == "1":
+        return
     env_path = Path(path)
     if not env_path.exists():
         return
@@ -24,4 +26,3 @@ def env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-

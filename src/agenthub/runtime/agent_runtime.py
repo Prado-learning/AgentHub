@@ -1,19 +1,49 @@
-﻿from __future__ import annotations
+"""Bounded model/tool loop context. Only explicitly planned proposal/read tools are exposed."""
 
-from agenthub.adapters.base import AgentAdapter, AgentResult, AgentTask
-from agenthub.domain.run import RunContext
+from contextvars import ContextVar
+from contextlib import contextmanager
+from dataclasses import dataclass
+from agenthub.harness.control import check_cancelled
+
+
+@dataclass
+class ToolSession:
+    schemas: list[dict]
+    invoke: object
+    max_rounds: int = 8
+
+
+_session = ContextVar("agenthub_tools", default=None)
+
+
+def current_tools():
+    return _session.get()
+
+
+@contextmanager
+def tool_session(schemas, invoke):
+    token = _session.set(ToolSession(schemas, invoke) if schemas else None)
+    try:
+        yield
+    finally:
+        _session.reset(token)
+
+
+def call_tool(session, name, arguments):
+    check_cancelled()
+    token = _session.set(
+        None
+    )  # A tool's own model call must not recursively call itself.
+    try:
+        return session.invoke(name, arguments)
+    finally:
+        _session.reset(token)
 
 
 class AgentRuntime:
-    """Executes one AgentDefinition through one adapter.
-
-    Today adapters perform a single model call. This class is the stable place
-    for evolving into a full agent loop with model-native tool calls.
-    """
-
-    def __init__(self, adapter: AgentAdapter) -> None:
+    def __init__(self, adapter):
         self.adapter = adapter
 
-    def run(self, task: AgentTask, context: RunContext) -> AgentResult:
+    def run(self, task, context):
+        check_cancelled()
         return self.adapter.run(task, context)
-

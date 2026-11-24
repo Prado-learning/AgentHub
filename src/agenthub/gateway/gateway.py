@@ -1,35 +1,18 @@
-"""Unified outbound gateway.
-
-Wraps an :class:`agenthub.adapters.base.AgentAdapter` so every call
-goes through the same path: optional cache lookup, signature header
-attachment, then delegated execution. The default
-:class:`NoopGateway` is a transparent pass-through, so production
-callers pay nothing until a real :class:`CacheBackend` is injected.
-"""
+"""Cache only explicitly cacheable read operations using complete input identity."""
 
 from __future__ import annotations
-
+import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Protocol
-
-from agenthub.adapters.base import AgentAdapter, AgentResult, AgentTask
+from agenthub.adapters.base import AgentResult, AgentTask
 from agenthub.domain.run import RunContext
-from agenthub.gateway.cache import CacheBackend, NoopCache, SingleFlight, cache_key, semantic_key
-from agenthub.gateway.signing import NoopSigner, Signer
+from agenthub.gateway.cache import CacheBackend, NoopCache, SingleFlight, cache_key
+from agenthub.gateway.signing import Signer, NoopSigner
 
 
 @dataclass(frozen=True)
 class GatewayDispatch:
-    """Bundle describing one logical outbound call.
-
-    The fields are normalised so :meth:`Gateway.dispatch` can pick a
-    cache key and a signature without re-parsing the underlying
-    adapter or task. ``cache_ttl_seconds`` is per-call so the harness
-    can use a longer TTL for idempotent reads and a shorter one for
-    stateful lookups.
-    """
-
     endpoint: str
     task: AgentTask
     context: RunContext
@@ -38,215 +21,128 @@ class GatewayDispatch:
 
 
 class Gateway(Protocol):
-    """Outbound interface every adapter call flows through."""
-
-    def dispatch(
-        self,
-        adapter: AgentAdapter,
-        dispatch: GatewayDispatch,
-    ) -> AgentResult:
-        ...
-
-    def cached(self) -> CacheBackend:
-        ...
-
-    def signer(self) -> Signer:
-        ...
+    def dispatch(self, adapter, dispatch: GatewayDispatch) -> AgentResult: ...
+    def cached(self) -> CacheBackend: ...
+    def signer(self) -> Signer: ...
 
 
 class NoopGateway:
-    """Transparent gateway — no cache, no signature, just delegate.
+    def __init__(self, cache=None, signer=None):
+        self._cache = NoopCache()
+        self._signer = signer or NoopSigner()
 
-    This is the default. It satisfies the :class:`Gateway` protocol so
-    callers can wire it in unconditionally and swap in a real gateway
-    later without touching the harness.
-    """
+    def dispatch(self, adapter, dispatch):
+        return adapter.run(dispatch.task, dispatch.context)
 
-    def __init__(
-        self,
-        cache: CacheBackend | None = None,
-        signer: Signer | None = None,
-    ) -> None:
-        self._cache: CacheBackend = cache or NoopCache()
-        self._signer: Signer = signer or NoopSigner()
-
-    def dispatch(
-        self,
-        adapter: AgentAdapter,
-        dispatch: GatewayDispatch,
-    ) -> AgentResult:
-        # Honour a positive TTL by attempting the cache lookup, but the
-        # default NoopCache misses every time, so this stays a
-        # pass-through.
-        key = semantic_key(
-            dispatch.endpoint,
-            [dispatch.task.instruction, *dispatch.extra_key_parts],
-        )
-        hit = self._cache.get(key)
-        if hit is not None:
-            return _agent_result_from_cache(hit)
-        result = adapter.run(dispatch.task, dispatch.context)
-        if dispatch.cache_ttl_seconds > 0 and result.status == "success":
-            self._cache.set(key, _agent_result_to_cache(result), dispatch.cache_ttl_seconds)
-        # The signature is intentionally not consumed here — callers
-        # that need to attach it to a real HTTP call should pull it
-        # from ``self.signer()`` before issuing the request.
-        _ = self._signer
-        return result
-
-    def cached(self) -> CacheBackend:
+    def cached(self):
         return self._cache
 
-    def signer(self) -> Signer:
+    def signer(self):
         return self._signer
 
 
-def _agent_result_to_cache(result: AgentResult) -> dict[str, Any]:
-    return {
-        "agent_id": result.agent_id,
-        "status": result.status,
-        "messages": list(result.messages),
-        "artifacts": list(result.artifacts),
-        "tool_calls": list(result.tool_calls),
-        "error": result.error,
+def _dispatch_key(adapter, dispatch):
+    provider = getattr(adapter, "provider", None)
+    identity = {
+        "class": f"{type(adapter).__module__}.{type(adapter).__qualname__}",
+        "skills": getattr(adapter, "skills", []),
+        "capabilities": getattr(adapter, "capabilities", []),
+        "name": getattr(adapter, "name", None),
+        "model": getattr(provider, "model", None),
+        "base_url": getattr(provider, "base_url", None),
+        "credential_identity": hashlib.sha256(
+            str(getattr(provider, "api_key", "")).encode()
+        ).hexdigest(),
     }
-
-
-def _agent_result_from_cache(payload: dict[str, Any]) -> AgentResult:
-    return AgentResult(
-        agent_id=str(payload.get("agent_id", "")),
-        status=str(payload.get("status", "success")),
-        messages=list(payload.get("messages") or []),
-        artifacts=list(payload.get("artifacts") or []),
-        tool_calls=list(payload.get("tool_calls") or []),
-        error=payload.get("error"),
+    return cache_key(
+        [
+            dispatch.endpoint,
+            asdict(dispatch.task),
+            asdict(dispatch.context),
+            identity,
+            list(dispatch.extra_key_parts),
+        ]
     )
 
 
-def build_default_gateway(
-    *,
-    cache: CacheBackend | None = None,
-    signer: Signer | None = None,
-    redis_url: str | None = None,
-    cache_ttl_seconds: int = 3_600_000,
-    enabled: bool | None = None,
-) -> Gateway:
-    """Construct the default gateway from environment + overrides.
+def _agent_result_to_cache(result):
+    return asdict(result)
 
-    Resolution order:
 
-    1. If ``enabled`` is False, return :class:`NoopGateway` regardless
-       of other settings. This is the kill switch — flip
-       ``GATEWAY_ENABLED=false`` to bypass caching without code changes.
-    2. If ``cache`` is supplied explicitly, use it as-is.
-    3. If ``redis_url`` or ``REDIS_URL`` env var is set, attempt a
-       :class:`RedisCache`. On import / connection failure, fall back
-       to :class:`NoopCache` and warn via stderr — production
-       deployments should monitor for that warning.
-    4. Otherwise stay on :class:`NoopCache`.
-    """
-
-    if enabled is False:
-        return NoopGateway(cache=cache, signer=signer)
-
-    resolved_cache = cache
-    if resolved_cache is None:
-        url = redis_url if redis_url is not None else os.environ.get("REDIS_URL")
-        if url:
-            try:
-                from agenthub.gateway.redis_cache import RedisCache
-                resolved_cache = RedisCache(url)
-            except Exception as exc:  # pragma: no cover - import/network dependent
-                import sys
-                print(
-                    f"[agenthub.gateway] Redis cache unavailable ({exc}); using noopCache.",
-                    file=sys.stderr,
-                )
-                resolved_cache = None
-
-    if resolved_cache is None:
-        # Stay inert: the NoopGateway will not store or hit anything.
-        return NoopGateway(cache=NoopCache(), signer=signer)
-
-    return CachingGateway(
-        cache=resolved_cache, signer=signer, default_ttl_seconds=cache_ttl_seconds
-    )
+def _agent_result_from_cache(payload):
+    return AgentResult(**payload)
 
 
 class CachingGateway:
-    """Gateway that actually consults and updates a :class:`CacheBackend`.
-
-    Used as soon as :func:`build_default_gateway` resolves a real
-    cache (Redis in production, ``InMemoryCache`` in tests). The
-    contract is identical to :class:`NoopGateway`; the only difference
-    is whether repeat calls short-circuit at the cache layer.
-    """
-
     def __init__(
-        self,
-        *,
-        cache: CacheBackend,
-        signer: Signer | None = None,
-        default_ttl_seconds: int = 3_600_000,
-        singleflight: bool = True,
-    ) -> None:
+        self, *, cache, signer=None, default_ttl_seconds=300, singleflight=True
+    ):
         self._cache = cache
         self._signer = signer or NoopSigner()
         self._default_ttl_seconds = default_ttl_seconds
         self._singleflight = SingleFlight(cache) if singleflight else None
 
-    def dispatch(
-        self,
-        adapter: AgentAdapter,
-        dispatch: GatewayDispatch,
-    ) -> AgentResult:
-        key = semantic_key(
-            dispatch.endpoint,
-            [dispatch.task.instruction, *dispatch.extra_key_parts],
-        )
-        ttl = dispatch.cache_ttl_seconds or self._default_ttl_seconds
-
-        if self._singleflight is not None:
-            cacheable = self._maybe_singleflight(adapter, dispatch, key, ttl)
-            return _agent_result_from_cache(cacheable)
-
-        return self._run_with_cache(adapter, dispatch, key, ttl)
-
-    def _maybe_singleflight(
-        self,
-        adapter: AgentAdapter,
-        dispatch: GatewayDispatch,
-        key: str,
-        ttl: int,
-    ) -> dict[str, Any]:
-        """Run through singleflight; cache only successful results."""
-
-        def _compute() -> dict[str, Any]:
-            result = adapter.run(dispatch.task, dispatch.context)
-            if ttl > 0 and result.status == "success":
-                self._cache.set(key, _agent_result_to_cache(result), ttl)
-            return _agent_result_to_cache(result)
-
-        assert self._singleflight is not None
-        return self._singleflight.get_or_compute(key, _compute)
-
-    def _run_with_cache(
-        self,
-        adapter: AgentAdapter,
-        dispatch: GatewayDispatch,
-        key: str,
-        ttl: int,
-    ) -> AgentResult:
-        hit = self._cache.get(key)
-        if hit is not None:
-            return _agent_result_from_cache(hit)
-        result = adapter.run(dispatch.task, dispatch.context)
-        if ttl > 0 and result.status == "success":
-            self._cache.set(key, _agent_result_to_cache(result), ttl)
-        return result
-
-    def cached(self) -> CacheBackend:
+    def cached(self):
         return self._cache
 
-    def signer(self) -> Signer:
+    def signer(self):
         return self._signer
+
+    def dispatch(self, adapter, dispatch):
+        ttl = dispatch.cache_ttl_seconds
+        if ttl <= 0 or getattr(adapter, "side_effecting", False):
+            return adapter.run(dispatch.task, dispatch.context)
+        key = _dispatch_key(adapter, dispatch)
+        computed = False
+
+        def compute():
+            nonlocal computed
+            computed = True
+            result = adapter.run(dispatch.task, dispatch.context)
+            payload = asdict(result)
+            if result.status == "success":
+                self._cache.set(key, payload, ttl)
+            return payload
+
+        try:
+            if self._singleflight:
+                payload = self._singleflight.get_or_compute(key, compute)
+            else:
+                payload = self._cache.get(key)
+                if payload is None:
+                    payload = compute()
+        except Exception:
+            # Cache outages must not hide an adapter error or repeat side effects.
+            # Redis errors are handled in its backend, computation errors propagate.
+            raise
+        result = _agent_result_from_cache(payload)
+        return replace(result, metrics={**result.metrics, "cache_hit": not computed})
+
+
+def build_default_gateway(
+    *, cache=None, signer=None, redis_url=None, cache_ttl_seconds=300, enabled=None
+):
+    if enabled is None:
+        enabled = os.environ.get("GATEWAY_ENABLED", "true").lower() not in {
+            "false",
+            "0",
+            "off",
+        }
+    if not enabled:
+        return NoopGateway(signer=signer)
+    if cache is None and (redis_url or os.environ.get("REDIS_URL")):
+        try:
+            from agenthub.gateway.redis_cache import RedisCache
+
+            cache = RedisCache(redis_url or os.environ["REDIS_URL"])
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning("Redis unavailable; caching disabled")
+    return (
+        CachingGateway(
+            cache=cache, signer=signer, default_ttl_seconds=cache_ttl_seconds
+        )
+        if cache is not None
+        else NoopGateway(signer=signer)
+    )

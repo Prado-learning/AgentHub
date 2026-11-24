@@ -1,272 +1,195 @@
-"""P0-3 — ``run_decisions`` REST router and decision service.
-
-The harness side of the equation is already exercised by
-``test_authority_and_gateway.py``. This suite covers the persistent
-side: the service upserts pending records, the API exposes them, and
-``confirm`` / ``decline`` round-trip cleanly.
-"""
-
-from __future__ import annotations
-
-import importlib
-import sys
+"""Durable decisions and real approval/resume API, including stale and duplicate requests."""
 
 import pytest
 from fastapi.testclient import TestClient
+from app.api.main import app
+from app.api.services import (
+    decision_service as decisions,
+    execution_service,
+    conversation_service,
+    run_store,
+)
+from agenthub.domain.run import RunContext
+from agenthub.domain.plan import Plan, PlanStep
+from agenthub.infrastructure.config.paths import conversation_workspace
+from agenthub.tools.builtin import deploy
 
 
 @pytest.fixture
-def decision_service(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    """Reload the decision service with a tmp path so tests can't
-    collide with real persisted data."""
-
-    runtime = tmp_path / "runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    # Reset module so it picks up the tmp RUNTIME_DIR.
-    for module_name in [
-        "app.api.services.decision_service",
-        "app.api.routers.run_decisions",
-    ]:
-        sys.modules.pop(module_name, None)
-
-    service = importlib.import_module("app.api.services.decision_service")
-    # The module picked up ``Path("agent-workspace/runtime")`` at import
-    # time — point its store at our tmp dir.
-    service.RUNTIME_DIR = runtime
-    service.DECISIONS = service.JsonStore(runtime / "run_decisions.json")
-    return service
+def client():
+    return TestClient(app)
 
 
-@pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    """Boot a TestClient against the real FastAPI app, but with the
-    decision store pointed at a tmp dir so we never write to
-    ``agent-workspace/runtime``. Each test gets a fresh dir so cross-test
-    state cannot leak."""
-
-    runtime = tmp_path / "runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-
-    # Reload decision service and the routers package so the runtime_dir
-    # patch takes effect everywhere. Popping ``app.api.routers`` itself
-    # forces a fresh re-import of every submodule on the next main import
-    # — otherwise the cached package would still expose stale function
-    # references whose ``__globals__['DECISIONS']`` points at the original
-    # production store.
-    for module_name in [
-        "app.api.services.decision_service",
-        "app.api.routers",
-        "app.api.routers.run_decisions",
-    ]:
-        sys.modules.pop(module_name, None)
-    service = importlib.import_module("app.api.services.decision_service")
-    service.RUNTIME_DIR = runtime
-    service.DECISIONS = service.JsonStore(runtime / "run_decisions.json")
-
-    # Now import the FastAPI app so the router picks up the patched module.
-    for module_name in ["app.api.main", "app.api.routers.run_decisions"]:
-        sys.modules.pop(module_name, None)
-    main_module = importlib.import_module("app.api.main")
-    test_client = TestClient(main_module.app)
-    # Start every test with an empty store.
-    service.DECISIONS.write([])
-    return test_client
-
-
-# ---------------------------------------------------------------------------
-# Service unit tests
-# ---------------------------------------------------------------------------
-
-
-def test_upsert_pending_records_metadata(decision_service) -> None:
-    record = decision_service.upsert_pending(
-        run_id="r1",
-        step_id="s1",
-        agent_id="ui_builder",
-        authority="L2",
-        task="render",
-        artifact_count=2,
+def seed(run="r1", step="s1"):
+    return decisions.upsert_pending(
+        run_id=run,
+        step_id=step,
+        agent_id="orchestrator",
+        authority="L3",
+        task="deploy",
+        artifact_count=0,
+        fingerprint="a" * 64,
     )
-    assert record["status"] == "pending"
-    assert record["run_id"] == "r1"
-    assert record["step_id"] == "s1"
-    assert record["authority"] == "L2"
-    assert record["artifact_count"] == 2
-    assert "created_at" in record
 
 
-def test_upsert_pending_is_idempotent(decision_service) -> None:
-    first = decision_service.upsert_pending(
-        run_id="r1", step_id="s1", agent_id="x", authority="L2", task="t", artifact_count=0
+def pending_run():
+    conversation_service.get_conversation("conv_demo")
+    context = RunContext(
+        conversation_id="conv_demo",
+        message="deploy",
+        history=[],
+        selected_agents=["orchestrator"],
+        workspace_dir=str(conversation_workspace("conv_demo")),
     )
-    second = decision_service.upsert_pending(
-        run_id="r1", step_id="s1", agent_id="x", authority="L2", task="t", artifact_count=0
+    result = execution_service.execute_context(
+        context,
+        plan=Plan(
+            steps=[
+                PlanStep(
+                    id="deploy",
+                    agent_id="orchestrator",
+                    kind="tool",
+                    task="Deploy reviewed HTML",
+                    tools=["deploy_tool"],
+                    arguments={"deploy_tool": {"preview_html": "<h1>Reviewed</h1>"}},
+                )
+            ],
+            reason="test",
+        ),
     )
-    assert first["created_at"] == second["created_at"]
-    # Only one record exists.
-    assert len(decision_service.DECISIONS.read()) == 1
+    execution_service.publish_result(result)
+    return result.run_id, decisions.list_pending_confirmations()[0]
 
 
-def test_confirm_flips_status_and_preserves_actor(decision_service) -> None:
-    decision_service.upsert_pending(
-        run_id="r1", step_id="s1", agent_id="x", authority="L2", task="t", artifact_count=0
+def test_upsert_idempotent():
+    first = seed()
+    assert seed()["created_at"] == first["created_at"]
+    assert len(decisions.DECISIONS.read()) == 1
+
+
+def test_approval_is_not_application():
+    seed()
+    result = decisions.confirm_step(
+        run_id="r1", step_id="s1", actor="alice", note="reviewed"
     )
-    decision = decision_service.confirm_step(
-        run_id="r1", step_id="s1", actor="alice", note="looks good"
-    )
-    assert decision["status"] == "applied"
-    assert decision["confirmed_by"] == "alice"
-    assert decision["note"] == "looks good"
+    assert result["status"] == "approved" and result["confirmed_by"] == "alice"
+    assert decisions.confirm_step(run_id="r1", step_id="s1", actor="bob") == result
 
 
-def test_confirm_is_idempotent(decision_service) -> None:
-    decision_service.upsert_pending(
-        run_id="r1", step_id="s1", agent_id="x", authority="L2", task="t", artifact_count=0
-    )
-    first = decision_service.confirm_step(run_id="r1", step_id="s1", actor="alice")
-    stamp = first["updated_at"]
-    second = decision_service.confirm_step(run_id="r1", step_id="s1", actor="bob")
-    # The second call is a no-op — actor stays as alice, timestamp is stable.
-    assert second["confirmed_by"] == "alice"
-    assert second["updated_at"] == stamp
+def test_decline_is_final():
+    seed()
+    result = decisions.decline_step(run_id="r1", step_id="s1", reason="no")
+    assert result["status"] == "rejected" and result["reason"] == "no"
+    with pytest.raises(ValueError):
+        decisions.confirm_step(run_id="r1", step_id="s1")
 
 
-def test_decline_records_reason(decision_service) -> None:
-    decision_service.upsert_pending(
-        run_id="r1", step_id="s1", agent_id="x", authority="L2", task="t", artifact_count=0
-    )
-    decision = decision_service.decline_step(
-        run_id="r1", step_id="s1", actor="bob", reason="out of scope"
-    )
-    assert decision["status"] == "rejected"
-    assert decision["declined_by"] == "bob"
-    assert decision["reason"] == "out of scope"
+def test_decline_after_approval_conflicts():
+    seed()
+    decisions.confirm_step(run_id="r1", step_id="s1")
+    with pytest.raises(ValueError):
+        decisions.decline_step(run_id="r1", step_id="s1")
 
 
-def test_decline_after_confirm_is_rejected(decision_service) -> None:
-    decision_service.upsert_pending(
-        run_id="r1", step_id="s1", agent_id="x", authority="L2", task="t", artifact_count=0
-    )
-    decision_service.confirm_step(run_id="r1", step_id="s1")
-    # Decline must not overwrite the confirm.
-    decision = decision_service.decline_step(run_id="r1", step_id="s1", reason="too late")
-    assert decision["status"] == "applied"
-    assert "reason" not in decision or decision.get("reason") != "too late"
-
-
-def test_confirm_unknown_step_raises(decision_service) -> None:
+def test_unknown_decision_raises():
     with pytest.raises(KeyError):
-        decision_service.confirm_step(run_id="r1", step_id="missing")
+        decisions.confirm_step(run_id="missing", step_id="x")
 
 
-def test_list_pending_filters_to_pending_only(decision_service) -> None:
-    decision_service.upsert_pending(
-        run_id="r1", step_id="s1", agent_id="x", authority="L2", task="t", artifact_count=0
+def test_pending_lists_filter(client):
+    seed()
+    seed("r2", "s2")
+    decisions.confirm_step(run_id="r1", step_id="s1")
+    assert (
+        len(client.get("/runs/pending-confirmations").json()["pending_confirmations"])
+        == 1
     )
-    decision_service.upsert_pending(
-        run_id="r1", step_id="s2", agent_id="x", authority="L3", task="t", artifact_count=0
+    assert (
+        client.get("/runs/r2/pending-confirmations").json()["pending_confirmations"][0][
+            "step_id"
+        ]
+        == "s2"
     )
-    decision_service.confirm_step(run_id="r1", step_id="s1")
-    pending = decision_service.list_pending_confirmations()
-    assert {item["step_id"] for item in pending} == {"s2"}
 
 
-# ---------------------------------------------------------------------------
-# Router / HTTP tests
-# ---------------------------------------------------------------------------
-
-
-def test_router_pending_endpoint_lists_all(client) -> None:
-    client.post(
-        "/runs/r1/pending-confirmations",
-        json={
-            "step_id": "s1",
-            "agent_id": "ui_builder",
-            "authority": "L2",
-            "task": "render",
-            "artifact_count": 2,
-        },
+def test_no_client_can_fabricate_pending_action(client):
+    assert (
+        client.post(
+            "/runs/r1/pending-confirmations", json={"step_id": "fake"}
+        ).status_code
+        == 405
     )
-    response = client.get("/runs/r1/pending-confirmations")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["run_id"] == "r1"
-    assert len(body["pending_confirmations"]) == 1
-    assert body["pending_confirmations"][0]["step_id"] == "s1"
 
 
-def test_router_global_endpoint_aggregates(client) -> None:
-    client.post(
-        "/runs/r1/pending-confirmations",
-        json={"step_id": "s1", "agent_id": "x", "authority": "L2", "task": "", "artifact_count": 0},
-    )
-    client.post(
-        "/runs/r2/pending-confirmations",
-        json={"step_id": "s2", "agent_id": "y", "authority": "L3", "task": "", "artifact_count": 0},
-    )
-    response = client.get("/runs/pending-confirmations")
-    assert response.status_code == 200
-    body = response.json()
-    run_ids = {entry["run_id"] for entry in body["pending_confirmations"]}
-    assert run_ids == {"r1", "r2"}
-
-
-def test_router_confirm_endpoint_returns_updated_record(client) -> None:
-    client.post(
-        "/runs/r1/pending-confirmations",
-        json={"step_id": "s1", "agent_id": "x", "authority": "L2", "task": "", "artifact_count": 0},
-    )
+def test_confirm_executes_and_is_idempotent(client):
+    run, decision = pending_run()
+    assert not deploy.DEPLOYMENT_DIR.exists()
+    url = f"/runs/{run}/steps/deploy/confirm"
     response = client.post(
-        "/runs/r1/steps/s1/confirm",
-        json={"actor": "alice", "note": "approved"},
+        url, json={"fingerprint": decision["fingerprint"], "actor": "alice"}
     )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["decision"]["status"] == "applied"
-    assert body["decision"]["confirmed_by"] == "alice"
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"]["status"] == "applied"
+    assert len(list(deploy.DEPLOYMENT_DIR.iterdir())) == 1
+    assert (
+        client.post(url, json={"fingerprint": decision["fingerprint"]}).status_code
+        == 200
+    )
+    assert len(list(deploy.DEPLOYMENT_DIR.iterdir())) == 1
+    assert run_store.load_run_result(run)["status"] == "success"
 
 
-def test_router_decline_endpoint_returns_updated_record(client) -> None:
-    client.post(
-        "/runs/r1/pending-confirmations",
-        json={"step_id": "s1", "agent_id": "x", "authority": "L3", "task": "", "artifact_count": 0},
+def test_stale_fingerprint_cannot_execute(client):
+    run, decision = pending_run()
+    assert (
+        client.post(
+            f"/runs/{run}/steps/deploy/confirm", json={"fingerprint": "b" * 64}
+        ).status_code
+        == 409
     )
+    assert not deploy.DEPLOYMENT_DIR.exists()
+
+
+def test_rejection_resumes_without_effect(client):
+    run, decision = pending_run()
     response = client.post(
-        "/runs/r1/steps/s1/decline",
-        json={"actor": "bob", "reason": "risky"},
+        f"/runs/{run}/steps/deploy/decline",
+        json={"fingerprint": decision["fingerprint"], "reason": "no"},
     )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["decision"]["status"] == "rejected"
-    assert body["decision"]["reason"] == "risky"
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"]["status"] == "rejected"
+    assert run_store.load_run_result(run)["status"] == "failed"
+    assert not deploy.DEPLOYMENT_DIR.exists()
 
 
-def test_router_confirm_returns_404_for_missing(client) -> None:
-    response = client.post(
-        "/runs/r1/steps/ghost/confirm",
-        json={"actor": "alice"},
+def test_cancel_waiting_action_prevents_confirmation(client):
+    run, decision = pending_run()
+    assert client.post(f"/runs/{run}/cancel", json={}).json()["status"] == "cancelled"
+    assert (
+        client.post(
+            f"/runs/{run}/steps/deploy/confirm",
+            json={"fingerprint": decision["fingerprint"]},
+        ).status_code
+        == 409
     )
-    assert response.status_code == 404
+    assert not deploy.DEPLOYMENT_DIR.exists()
 
 
-def test_router_read_decision_endpoint(client) -> None:
-    client.post(
-        "/runs/r1/pending-confirmations",
-        json={"step_id": "s1", "agent_id": "x", "authority": "L2", "task": "", "artifact_count": 0},
+def test_missing_and_invalid_confirm(client):
+    assert (
+        client.post(
+            "/runs/missing/steps/no/confirm", json={"fingerprint": "a" * 64}
+        ).status_code
+        == 404
     )
-    response = client.get("/runs/r1/steps/s1/decision")
-    assert response.status_code == 200
-    assert response.json()["decision"]["status"] == "pending"
-
-    response = client.get("/runs/r1/steps/ghost/decision")
-    assert response.status_code == 404
+    assert client.post("/runs/missing/steps/no/confirm", json={}).status_code == 422
 
 
-def test_router_health_still_works(client) -> None:
-    """The router addition should not break the baseline endpoints."""
-
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+def test_read_decision_and_health(client):
+    seed()
+    assert (
+        client.get("/runs/r1/steps/s1/decision").json()["decision"]["status"]
+        == "pending"
+    )
+    assert client.get("/runs/r1/steps/unknown/decision").status_code == 404
+    assert client.get("/health").json() == {"status": "ok"}

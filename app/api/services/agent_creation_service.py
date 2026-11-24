@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from agenthub.infrastructure.config.paths import runtime_dir, data_root
 
 from app.api.services.agent_service import create_custom_agent
 from app.api.services.conversation_store import JsonStore
@@ -10,7 +11,7 @@ from agenthub.application.tools.catalog import ToolCatalog
 from agenthub.runtime.prompt_builder import format_messages_for_prompt
 
 
-RUNTIME_DIR = Path("agent-workspace/runtime")
+RUNTIME_DIR = runtime_dir()
 SESSIONS = JsonStore(RUNTIME_DIR / "agent_creation_sessions.json")
 CREATE_PATTERN = re.compile(
     r"(创建|新建|新增|配置|create|build|add).{0,20}(agent|智能体)",
@@ -108,7 +109,8 @@ def _merge_draft(current: dict, payload: dict) -> dict:
         ),
         "tools": tools,
         "skills": _string_list(payload.get("skills") or current.get("skills")),
-        "model_provider": payload.get("model_provider") or current.get("model_provider"),
+        "model_provider": payload.get("model_provider")
+        or current.get("model_provider"),
         "model_name": payload.get("model_name") or current.get("model_name"),
     }
 

@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+from agenthub.runtime.result_parser import artifacts_from_text, upstream_context
 
 from agenthub.adapters.base import AgentResult, AgentTask
 from agenthub.domain.run import RunContext
@@ -31,7 +33,9 @@ class OpenAIChatAdapter:
         prompt = self._build_prompt(task, context)
         try:
             if "vision" in self.capabilities:
-                content = self.provider.complete_with_attachments(prompt, context.attachments or [])
+                content = self.provider.complete_with_attachments(
+                    prompt, context.attachments or []
+                )
             else:
                 content = self.provider.complete(prompt)
         except Exception as exc:
@@ -61,19 +65,11 @@ class OpenAIChatAdapter:
             artifacts=self._build_artifacts(content),
         )
 
+    cacheable = True
+    side_effecting = False
+
     def _build_artifacts(self, content: str) -> list[dict]:
-        if self.id == "ui_builder":
-            return [
-                {
-                    "id": "art_001",
-                    "type": "code",
-                    "title": "Generated UI Code",
-                    "language": "tsx",
-                    "file_path": "GeneratedUI.tsx",
-                    "content": content,
-                },
-            ]
-        return []
+        return artifacts_from_text(self.id, content)
 
     def _build_prompt(self, task: AgentTask, context: RunContext) -> str:
         history = format_messages_for_prompt(context.history, limit=6)
@@ -86,6 +82,7 @@ class OpenAIChatAdapter:
             f"Conversation summary:\n{self._format_summary(context)}\n\n"
             f"Current attachments:\n{self._format_attachments(context)}\n\n"
             f"Recent history:\n{history}\n\n"
+            f"Upstream step artifacts (use exact content):\n{upstream_context(context)}\n\n"
             f"Current task:\n{task.instruction}"
         )
 
@@ -117,7 +114,9 @@ class OpenAIChatAdapter:
     def _format_summary(self, context: RunContext) -> str:
         if not context.conversation_summary:
             return "No long-context summary."
-        return str(context.conversation_summary.get("content") or "No long-context summary.")
+        return str(
+            context.conversation_summary.get("content") or "No long-context summary."
+        )
 
     def _format_attachments(self, context: RunContext) -> str:
         if not context.attachments:

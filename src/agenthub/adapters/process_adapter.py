@@ -3,12 +3,16 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import subprocess
 from pathlib import Path
+from uuid import uuid4
+
+from agenthub.harness.control import RunCancelled, BudgetExceeded, check_cancelled
+from agenthub.runtime.result_parser import upstream_context
 
 from agenthub.adapters.base import AgentResult, AgentTask
 from agenthub.domain.run import RunContext
 from agenthub.runtime.prompt_builder import format_messages_for_prompt
+from agenthub.sandbox import current_sandbox
 
 
 def run_cli_agent(
@@ -33,15 +37,18 @@ def run_cli_agent(
 
     try:
         command = _split_command(command_text)
-        completed = subprocess.run(
+        workspace = Path(context.workspace_dir) if context.workspace_dir else None
+        if workspace is None:
+            raise ValueError("CLI execution requires a conversation workspace")
+        workspace.mkdir(parents=True, exist_ok=True)
+        completed = _run_process(
             command,
-            input=_prompt(name, task, context, skills or []),
-            capture_output=True,
-            text=True,
-            cwd=Path.cwd(),
-            timeout=_timeout(timeout_env_key),
-            check=False,
+            _prompt(name, task, context, skills or []),
+            workspace,
+            _timeout(timeout_env_key),
         )
+    except (RunCancelled, BudgetExceeded):
+        raise
     except Exception as exc:
         return AgentResult(
             agent_id=agent_id,
@@ -71,7 +78,16 @@ def run_cli_agent(
 
 
 def _split_command(command_text: str) -> list[str]:
-    return shlex.split(command_text, posix=os.name != "nt")
+    parts = shlex.split(command_text, posix=os.name != "nt")
+    return [
+        part[1:-1]
+        if os.name == "nt"
+        and len(part) > 1
+        and part[0] == part[-1]
+        and part[0] in {chr(34), chr(39)}
+        else part
+        for part in parts
+    ]
 
 
 def _timeout(env_key: str) -> int:
@@ -90,6 +106,7 @@ def _prompt(name: str, task: AgentTask, context: RunContext, skills: list[str]) 
         f"Requested tools: {', '.join(task.tools) or 'none'}\n\n"
         f"Skills:\n{chr(10).join(skills) if skills else 'No extra skills.'}\n\n"
         f"Recent history:\n{history}\n\n"
+        f"Upstream artifacts:\n{upstream_context(context)}\n"
         f"Task:\n{task.instruction}\n"
     )
 
@@ -123,7 +140,16 @@ def _artifacts_from_output(agent_id: str, content: str) -> list[dict]:
                     "producer_agent_id": agent_id,
                 }
             )
-        elif language.lower() in {"tsx", "jsx", "ts", "js", "html", "css", "python", "py"}:
+        elif language.lower() in {
+            "tsx",
+            "jsx",
+            "ts",
+            "js",
+            "html",
+            "css",
+            "python",
+            "py",
+        }:
             artifacts.append(
                 {
                     "id": f"{agent_id}_code_{index}",
@@ -135,3 +161,34 @@ def _artifacts_from_output(agent_id: str, content: str) -> list[dict]:
                 }
             )
     return artifacts
+
+
+def _sandbox_for(workspace: Path):
+    """The sandbox this CLI call must run inside.
+
+    A run-scoped sandbox is preferred so the process inherits the run's
+    boundary, limits and audit trail. When an adapter is exercised
+    outside a run, an ephemeral sandbox with the default spec keeps the
+    same code path instead of forking back to raw ``subprocess``.
+    """
+    sandbox = current_sandbox()
+    if sandbox is not None:
+        return sandbox
+    from agenthub.sandbox.backends.local import LocalSandbox
+    from agenthub.sandbox.spec import SandboxSpec
+
+    ephemeral = LocalSandbox(
+        SandboxSpec(run_id=f"adhoc_{uuid4().hex[:8]}", workspace_root=workspace)
+    )
+    ephemeral.start()
+    return ephemeral
+
+
+def _run_process(command, prompt, workspace, timeout):
+    check_cancelled()
+    # Every process the harness starts goes through the sandbox: job
+    # object or process group for containment, the spec's ceilings, the
+    # credential allow-list, and an audit record.
+    return _sandbox_for(workspace).exec(
+        command, cwd=workspace, stdin=prompt, timeout=timeout
+    )

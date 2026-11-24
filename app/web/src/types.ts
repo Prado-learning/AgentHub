@@ -136,10 +136,14 @@ export type StructuredDiffLine = {
 
 export type StructuredDiff = {
   artifact_id: string;
+  status?: string;
+  review_token: string;
+  workspace_dir: string;
   files: Array<{
     old_path: string;
     new_path: string;
     hunks: Array<{
+      id: string;
       header: string;
       lines: StructuredDiffLine[];
     }>;
@@ -188,6 +192,13 @@ export type ToolPreferences = {
   diff: boolean;
 };
 
+export type SandboxBoundary = {
+  network: string;
+  may_start_processes: boolean;
+  may_write_files: boolean;
+  note: string;
+};
+
 export type PendingDecision = {
   run_id: string;
   step_id: string;
@@ -195,7 +206,12 @@ export type PendingDecision = {
   authority: "L1" | "L2" | "L3";
   task: string;
   artifact_count: number;
-  status: "pending" | "applied" | "rejected";
+  status: "pending" | "approved" | "applied" | "rejected" | "failed" | "cancelled";
+  fingerprint: string;
+  tools: string[];
+  arguments: Record<string, unknown>;
+  workspace_dir: string;
+  sandbox?: SandboxBoundary;
   created_at: string;
   updated_at: string;
 };

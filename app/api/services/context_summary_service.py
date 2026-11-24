@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from agenthub.infrastructure.config.paths import runtime_dir, data_root
 
 from app.api.services.conversation_store import JsonStore
 from app.api.services.llm_service import build_required_llm_provider
 from agenthub.runtime.prompt_builder import format_messages_for_prompt
 
 
-RUNTIME_DIR = Path("agent-workspace/runtime")
+RUNTIME_DIR = runtime_dir()
 SUMMARIES = JsonStore(RUNTIME_DIR / "conversation_summaries.json")
 MAX_HISTORY_MESSAGES_WITHOUT_SUMMARY = 18
 MAX_HISTORY_CHARS_WITHOUT_SUMMARY = 10000
@@ -21,7 +22,10 @@ def get_or_update_summary(
     model_name: str | None = None,
 ) -> dict | None:
     total_chars = sum(len(str(item.get("content") or "")) for item in history)
-    if len(history) < MAX_HISTORY_MESSAGES_WITHOUT_SUMMARY and total_chars < MAX_HISTORY_CHARS_WITHOUT_SUMMARY:
+    if (
+        len(history) < MAX_HISTORY_MESSAGES_WITHOUT_SUMMARY
+        and total_chars < MAX_HISTORY_CHARS_WITHOUT_SUMMARY
+    ):
         return _get_summary(conversation_id)
 
     previous = _get_summary(conversation_id)
@@ -41,7 +45,11 @@ def get_or_update_summary(
 
     def _mutate(records: list[dict]) -> list[dict]:
         return [
-            *[item for item in records if item.get("conversation_id") != conversation_id],
+            *[
+                item
+                for item in records
+                if item.get("conversation_id") != conversation_id
+            ],
             summary,
         ]
 
@@ -51,7 +59,11 @@ def get_or_update_summary(
 
 def _get_summary(conversation_id: str) -> dict | None:
     return next(
-        (item for item in SUMMARIES.read() if item.get("conversation_id") == conversation_id),
+        (
+            item
+            for item in SUMMARIES.read()
+            if item.get("conversation_id") == conversation_id
+        ),
         None,
     )
 

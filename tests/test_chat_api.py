@@ -87,6 +87,7 @@ def test_models_endpoint() -> None:
     assert response.status_code == 200
     assert [model["id"] for model in response.json()["models"]] == [
         "auto",
+        "openai",
         "stepfun",
         "deepseek",
         "doubao",
@@ -98,4 +99,3 @@ def test_preview_endpoint_returns_html() -> None:
 
     assert response.status_code == 200
     assert "Todo List" in response.text
-

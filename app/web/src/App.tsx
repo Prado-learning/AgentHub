@@ -1,10 +1,13 @@
+import {DiffReviewDialog} from "./components/DiffReviewDialog";
+import {RuntimeModeBadge} from "./components/RuntimeModeBadge";
+import {ActiveRuns} from "./components/ActiveRuns";
+import {DiffViewer} from "./components/DiffViewer";
 import { ChangeEvent, CSSProperties, Dispatch, FormEvent, MouseEvent as ReactMouseEvent, ReactNode, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PendingConfirmationCard } from "./components/PendingConfirmationCard";
 import { DebugTracePanel } from "./components/DebugTracePanel";
 import { usePendingDecisions } from "./hooks";
 import {
-  applyArtifactDiff,
   archiveConversation,
   createAgent,
   createConversation,
@@ -203,6 +206,7 @@ function App() {
   const [draftAgentIds, setDraftAgentIds] = useState<string[]>(["orchestrator"]);
   const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
   const [editArtifact, setEditArtifact] = useState<Artifact | null>(null);
+  const [reviewDiff, setReviewDiff] = useState<StructuredDiff | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [agentDraft, setAgentDraft] = useState<AgentCreateInput>({
     name: "",
@@ -457,6 +461,17 @@ function App() {
       return;
     }
     reloadConversationDetail(activeConversationId);
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    const refresh = () => { if (activeConversationId) void reloadConversationDetail(activeConversationId); void refreshPendingDecisions(); };
+    const progress = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      updateConversationRuntime(detail.conversationId, {progressSteps: progressFromEvents(detail.events)});
+    };
+    window.addEventListener("agenthub:data-updated", refresh);
+    window.addEventListener("agenthub:run-progress", progress);
+    return () => { window.removeEventListener("agenthub:data-updated", refresh); window.removeEventListener("agenthub:run-progress", progress); };
   }, [activeConversationId]);
 
   async function reloadConversations(preferredId?: string) {
@@ -950,11 +965,7 @@ function App() {
 
   async function handleApplyDiff(artifact: Artifact) {
     try {
-      await applyArtifactDiff(artifact.id);
-      setArtifacts((current) =>
-        current.map((item) => (item.id === artifact.id ? { ...item, status: "applied" } : item)),
-      );
-      setToast("Diff 已应用");
+      setReviewDiff(await getArtifactDiff(artifact.id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Apply diff failed");
     }
@@ -970,9 +981,11 @@ function App() {
       progressSteps: initialProgressSteps(selectedModelId, attachments.length),
       thinkingStartedAt: Date.now(),
     });
+    const controller = new AbortController();
+    abortControllersByConversationRef.current[conversationId] = controller;
     setError("");
     try {
-      const response = await runWorkflowArtifact(artifact.id, selectedModelId);
+      const response = await runWorkflowArtifact(artifact.id, selectedModelId, undefined, controller.signal);
       applyChatResponse(conversationId, response);
       setRightPanelOpen(true);
       setRightTab("artifacts");
@@ -988,6 +1001,7 @@ function App() {
       }));
       setError(err instanceof Error ? err.message : "Workflow run failed");
     } finally {
+      delete abortControllersByConversationRef.current[conversationId];
       updateConversationRuntime(conversationId, { isSending: false, thinkingStartedAt: null });
     }
   }
@@ -1182,6 +1196,7 @@ function App() {
           <span className={`status-chip ${runningConversationCount ? "running" : ""}`}>
             {runningConversationCount ? `${labels.running} ${runningConversationCount}` : labels.ready}
           </span>
+          <RuntimeModeBadge />
           {pendingDecisionCount > 0 ? (
             <button
               type="button"
@@ -1468,6 +1483,7 @@ function App() {
               <button type="button" onClick={() => { setQuotedMessage(null); setQuotedText(""); }}>{labels.clear}</button>
             </div>
           ) : null}
+          <ActiveRuns key={activeConversationId} conversationId={activeConversationId} />
           {pendingAttachments.length ? (
             <div className="pending-files">
               <span>{labels.pendingFiles}</span>
@@ -1480,6 +1496,7 @@ function App() {
           ) : null}
           <textarea
             ref={composerTextareaRef}
+                aria-label="消息"
             rows={2}
             value={input}
             onChange={(event) => {
@@ -1591,6 +1608,7 @@ function App() {
         />
       </aside>
 
+      {reviewDiff ? <DiffReviewDialog diff={reviewDiff} onClose={() => setReviewDiff(null)} /> : null}
       {editArtifact ? (
         <div className="preview-modal" role="dialog" aria-modal="true">
           <div className="editor-card">
@@ -2451,7 +2469,7 @@ function RightPanelContent({
             <p className="approvals-error">⚠ {pendingDecisionsError}</p>
           ) : null}
           {pendingDecisions.length === 0 && !pendingDecisionsLoading ? (
-            <p>当前没有待处理的审批。harness 完成 L2/L3 步骤后会出现在这里。</p>
+            <p>当前没有待处理的审批。Harness 在执行需要确认的步骤之前，会在这里等待审批。</p>
           ) : null}
           {pendingDecisions.map((decision) => (
             <PendingConfirmationCard
@@ -2646,7 +2664,7 @@ function ArtifactPreviewPanel({
           srcDoc={inlineHtml}
         />
       ) : previewUrl ? (
-        <iframe title={`${artifact.title} preview`} src={previewUrl} />
+        <iframe sandbox="allow-forms allow-scripts" title={`${artifact.title} preview`} src={previewUrl} />
       ) : (
         <div className="artifact-preview-empty">
           <strong>暂不支持直接预览</strong>
@@ -2849,84 +2867,6 @@ function MarkdownMessage({
       )}
     </div>
   );
-}
-
-function DiffViewer({ diff }: { diff: StructuredDiff }) {
-  const [reviewedHunks, setReviewedHunks] = useState<Set<string>>(new Set());
-
-  function toggleHunkReview(hunkKey: string) {
-    setReviewedHunks((current) => {
-      const next = new Set(current);
-      if (next.has(hunkKey)) {
-        next.delete(hunkKey);
-      } else {
-        next.add(hunkKey);
-      }
-      return next;
-    });
-  }
-
-  return (
-    <div className="diff-viewer split">
-      {diff.files.map((file) => (
-        <section key={`${file.old_path}-${file.new_path}`}>
-          <header>
-            <strong>{file.old_path}</strong>
-            <strong>{file.new_path}</strong>
-          </header>
-          {file.hunks.map((hunk) => {
-            const hunkKey = `${file.old_path}-${file.new_path}-${hunk.header}`;
-            const reviewed = reviewedHunks.has(hunkKey);
-            return (
-            <div className={`diff-hunk ${reviewed ? "reviewed" : ""}`} key={hunk.header}>
-              <div className="diff-hunk-header">
-                <small>{hunk.header}</small>
-                <button type="button" onClick={() => toggleHunkReview(hunkKey)}>
-                  {reviewed ? "Reviewed" : "Confirm hunk"}
-                </button>
-              </div>
-              {splitDiffRows(hunk.lines).map((row, index) => (
-                <div className="diff-split-row" key={`${hunk.header}-${index}`}>
-                  <div className={`diff-split-cell ${row.old?.type ?? "empty"}`}>
-                    <span>{row.old?.old_no ?? ""}</span>
-                    <code>{row.old ? `${row.old.type === "remove" ? "-" : " "}${row.old.content}` : ""}</code>
-                  </div>
-                  <div className={`diff-split-cell ${row.next?.type ?? "empty"}`}>
-                    <span>{row.next?.new_no ?? ""}</span>
-                    <code>{row.next ? `${row.next.type === "add" ? "+" : " "}${row.next.content}` : ""}</code>
-                  </div>
-                </div>
-              ))}
-            </div>
-          );
-          })}
-        </section>
-      ))}
-    </div>
-  );
-}
-
-function splitDiffRows(lines: StructuredDiffLine[]): Array<{ old?: StructuredDiffLine; next?: StructuredDiffLine }> {
-  const rows: Array<{ old?: StructuredDiffLine; next?: StructuredDiffLine }> = [];
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    const nextLine = lines[index + 1];
-    if (line.type === "remove" && nextLine?.type === "add") {
-      rows.push({ old: line, next: nextLine });
-      index += 2;
-      continue;
-    }
-    if (line.type === "remove") {
-      rows.push({ old: line });
-    } else if (line.type === "add") {
-      rows.push({ next: line });
-    } else {
-      rows.push({ old: line, next: line });
-    }
-    index += 1;
-  }
-  return rows;
 }
 
 type MarkdownBlock =

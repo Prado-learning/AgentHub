@@ -6,8 +6,7 @@ import pytest
 
 from agenthub import HarnessRunner
 from agenthub.domain.run import RunContext
-from agenthub.tracing import FlowTracer, StageRecorder
-from agenthub.tracing.tracer import _NullRecorder
+from agenthub.harness.tracing import FlowTracer, StageRecorder, _NullRecorder
 
 
 def test_flow_tracer_disabled_by_default() -> None:
@@ -94,7 +93,11 @@ def test_harness_runner_run_with_tracer_disabled_yields_empty_debug_trace(
     )
 
     # Lifecycle events still flow into the front-end-facing event stream.
-    assert [event.type for event in runner.events[:2]] == ["run.started", "run.planned"]
+    assert [event.type for event in runner.events[:3]] == [
+        "run.started",
+        "context.loaded",
+        "run.planned",
+    ]
     # But the debug_trace stage log is empty (no overhead, no data).
     assert runner.debug_trace == []
 
@@ -126,9 +129,13 @@ def test_harness_runner_run_with_tracer_enabled_populates_debug_trace(
     # We expect at least one step-level stage and one tool-level stage
     # because ui_builder / file_reader run inside begin_stage blocks.
     assert any(sid.startswith("step_") for sid in stage_ids), stage_ids
-    assert any(".preview_tool" in sid or ".file_reader_tool" in sid for sid in stage_ids), stage_ids
+    assert any(
+        ".preview_tool" in sid or ".file_reader_tool" in sid for sid in stage_ids
+    ), stage_ids
 
-    planned = next(trace for trace in runner.debug_trace if trace.stage_id == "run.planned")
+    planned = next(
+        trace for trace in runner.debug_trace if trace.stage_id == "run.planned"
+    )
     assert planned.inputs["step_count"] >= 1
     assert "ui_builder" in {step["agent_id"] for step in planned.inputs["steps"]}
     # Planner must have inferred an authority per step.
@@ -142,7 +149,9 @@ def test_harness_runner_run_with_tracer_enabled_populates_debug_trace(
     assert "authority_tiers" in completed.inputs
 
 
-def test_harness_runner_explicit_tracer_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_harness_runner_explicit_tracer_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Passing a tracer explicitly beats the environment default."""
 
     monkeypatch.delenv("AGENT_DEBUG", raising=False)

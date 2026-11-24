@@ -46,25 +46,10 @@ class _FakeRunResult:
 
 
 @pytest.fixture
-def run_store(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    """Reload ``run_store`` with the tmp dir so it never writes to prod."""
+def run_store():
+    from app.api.services import run_store
 
-    for module_name in [
-        "app.api.services.run_store",
-        "app.api.routers.run_decisions",
-        "app.api.routers",
-        "app.api.main",
-    ]:
-        sys.modules.pop(module_name, None)
-
-    store = importlib.import_module("app.api.services.run_store")
-    runtime_dir = tmp_path / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    # Patch the module's globals in-place; reloading would re-execute the
-    # module body and undo our assignments.
-    monkeypatch.setattr(store, "RUNTIME_DIR", runtime_dir, raising=False)
-    monkeypatch.setattr(store, "RUNS_DIR", runtime_dir / "runs", raising=False)
-    return store
+    return run_store
 
 
 def test_save_and_load_run_snapshot(run_store) -> None:
@@ -156,40 +141,10 @@ def test_reset_for_tests_wipes_everything(run_store) -> None:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    """Wire the FastAPI app at a tmp runtime dir for each test."""
+def client():
+    from app.api.main import app
 
-    runtime = tmp_path / "runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-
-    for module_name in [
-        "app.api.services.run_store",
-        "app.api.services.decision_service",
-        "app.api.routers",
-        "app.api.routers.run_decisions",
-        "app.api.main",
-    ]:
-        sys.modules.pop(module_name, None)
-
-    run_store_mod = importlib.import_module("app.api.services.run_store")
-    monkeypatch.setattr(run_store_mod, "RUNTIME_DIR", runtime, raising=False)
-    monkeypatch.setattr(run_store_mod, "RUNS_DIR", runtime / "runs", raising=False)
-
-    decision_service = importlib.import_module("app.api.services.decision_service")
-    decision_service.RUNTIME_DIR = runtime
-    decision_service.DECISIONS = decision_service.JsonStore(
-        runtime / "run_decisions.json"
-    )
-
-    for module_name in [
-        "app.api.routers.run_decisions",
-        "app.api.main",
-    ]:
-        sys.modules.pop(module_name, None)
-    main = importlib.import_module("app.api.main")
-    test_client = TestClient(main.app)
-    decision_service.DECISIONS.write([])
-    return test_client
+    return TestClient(app)
 
 
 def test_debug_trace_endpoint_returns_persisted_stages(client, run_store) -> None:

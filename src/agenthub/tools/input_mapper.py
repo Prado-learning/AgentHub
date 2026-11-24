@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from agenthub.domain.plan import PlanStep
 from agenthub.domain.run import RunContext
@@ -10,9 +10,22 @@ def tool_kwargs_for(
     step: PlanStep,
     context: RunContext,
 ) -> dict:
+    arguments = step.arguments.get(tool_id, step.arguments) if step.arguments else {}
+    if (
+        tool_id
+        in {
+            "ui_builder_tool",
+            "workflow_builder_tool",
+            "code_review_tool",
+            "preview_tool",
+            "deploy_tool",
+        }
+        and arguments
+    ):
+        return arguments
     latest_code = latest_code_content(artifacts)
     if tool_id == "ui_builder_tool":
-        return {"prompt": step.task or context.message}
+        return {"prompt": step.task or context.message, "code": latest_code}
     if tool_id == "workflow_builder_tool":
         return {"prompt": step.task or context.message}
     if tool_id == "preview_tool":

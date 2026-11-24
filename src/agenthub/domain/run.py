@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +18,7 @@ class RunContext:
     attachments: list[dict] | None = None
     tool_preferences: dict | None = None
     workspace_dir: str = "agent-workspace"
+    upstream_artifacts: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -36,9 +37,9 @@ class RunResult:
     artifacts: list[dict] = field(default_factory=list)
     events: list[RunEvent] = field(default_factory=list)
     debug_trace: list["StageTrace"] = field(default_factory=list)
+    checkpoint: dict = field(default_factory=dict)
 
 
 # Imported at module bottom to keep the public surface flat and avoid a
 # circular import if the trace module ever needs to reference RunEvent.
 from agenthub.domain.trace import StageTrace  # noqa: E402
-

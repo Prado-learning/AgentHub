@@ -3,6 +3,10 @@ models:
     name: Auto
     provider: auto
     env_prefix: ""
+  - id: openai
+    name: OpenAI-compatible
+    provider: openai_compatible
+    env_prefix: OPENAI
   - id: stepfun
     name: StepFun
     provider: openai_compatible

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from agenthub import HarnessRunner
 from agenthub.adapters.base import AgentTask
-from agenthub.application.agents.runtime_profile import AgentRuntimeProfile
+from agenthub.agent.runtime_profile import AgentRuntimeProfile
 from agenthub.domain.run import RunContext
 from agenthub.harness.fallback import FallbackChain
 from agenthub.harness.limits import RunLimits
@@ -60,7 +60,11 @@ def test_run_limits_enforce_step_budget() -> None:
 
 
 def test_fallback_chain_returns_first_success_with_note() -> None:
-    chain = FallbackChain()
+    from agenthub.adapters.mock.adapter import MockAgentAdapter
+
+    chain = FallbackChain(
+        adapter_factories=[lambda agent_id: MockAgentAdapter(agent_id=agent_id)]
+    )
 
     result = chain.run(
         "ui_builder",
@@ -97,7 +101,9 @@ def test_runner_step_limit_skips_excess_steps() -> None:
 
     assert result.status == "partial_success"
     skipped_events = [
-        event for event in result.events if event.payload.get("reason") == "run step limit exceeded"
+        event
+        for event in result.events
+        if event.payload.get("reason") == "run step limit exceeded"
     ]
     assert [event.payload["agent_id"] for event in skipped_events] == ["code_reviewer"]
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from app.api.services.agent_service import list_custom_agents
+from agenthub.infrastructure.persistence.custom_agents import list_custom_agents
 from agenthub.domain.agent import AgentDefinition
 from agenthub.infrastructure.config.loader import load_yaml_config
 

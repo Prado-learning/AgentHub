@@ -40,9 +40,11 @@ export function PendingConfirmationCard(props: PendingConfirmationCardProps) {
     try {
       const updated = await confirmRunStep(decision.run_id, decision.step_id, {
         actor: "user",
+        fingerprint: decision.fingerprint,
         note: confirmNote.trim() || undefined,
       });
       onResolved(updated);
+      window.dispatchEvent(new Event("agenthub:data-updated"));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -56,9 +58,11 @@ export function PendingConfirmationCard(props: PendingConfirmationCardProps) {
     try {
       const updated = await declineRunStep(decision.run_id, decision.step_id, {
         actor: "user",
+        fingerprint: decision.fingerprint,
         reason: declineReason.trim() || undefined,
       });
       onResolved(updated);
+      window.dispatchEvent(new Event("agenthub:data-updated"));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -98,9 +102,19 @@ export function PendingConfirmationCard(props: PendingConfirmationCardProps) {
           <dd>{formatTimestamp(decision.created_at)}</dd>
         </div>
       </dl>
+      <p>工具：{decision.tools?.join(", ") || "CLI Agent"}</p>
+      <p>工作区：{decision.workspace_dir}</p>
+      {decision.sandbox && (
+        <p className="pending-sandbox" title={decision.sandbox.note}>
+          沙箱边界：网络 {decision.sandbox.network} ·{" "}
+          {decision.sandbox.may_write_files ? "可写文件" : "只读"} ·{" "}
+          {decision.sandbox.may_start_processes ? "可起进程" : "不可起进程"}
+        </p>
+      )}
+      <pre>{JSON.stringify(decision.arguments, null, 2)}</pre>
       {isL3 && (
         <p className="pending-warning">
-          L3 步骤在执行后只产出 SOP,不会被 harness 自动落库 — 需要人工确认才能继续。
+          此步骤尚未执行。确认后 Harness 将执行下列动作并继续运行。
         </p>
       )}
       <div className="pending-actions">
@@ -124,6 +138,7 @@ export function PendingConfirmationCard(props: PendingConfirmationCardProps) {
       {showReason && (
         <div className="pending-decline-form">
           <textarea
+            aria-label="拒绝理由（可选）"
             placeholder="(可选) 拒绝理由,有助于 audit trail"
             value={declineReason}
             onChange={(event) => setDeclineReason(event.target.value)}
@@ -133,7 +148,7 @@ export function PendingConfirmationCard(props: PendingConfirmationCardProps) {
           <button
             type="button"
             className="pending-btn decline"
-            disabled={busy !== null || declineReason.trim().length === 0}
+            disabled={busy !== null}
             onClick={handleDecline}
           >
             {busy === "decline" ? "拒绝中…" : "提交拒绝"}
@@ -143,6 +158,7 @@ export function PendingConfirmationCard(props: PendingConfirmationCardProps) {
       {!showReason && (
         <div className="pending-note-form">
           <input
+            aria-label="确认备注（可选）"
             type="text"
             placeholder="(可选) 确认备注"
             value={confirmNote}
@@ -151,7 +167,7 @@ export function PendingConfirmationCard(props: PendingConfirmationCardProps) {
           />
         </div>
       )}
-      {error && <p className="pending-error">⚠ {error}</p>}
+      {error && <p role="alert" className="pending-error">⚠ {error}</p>}
     </div>
   );
 }

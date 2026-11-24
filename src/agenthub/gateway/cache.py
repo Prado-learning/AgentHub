@@ -14,6 +14,8 @@ same protocol.
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
+from concurrent.futures import Future
 import json
 import threading
 import time
@@ -72,7 +74,9 @@ def cache_key(parts: list[Any]) -> str:
     regardless of how long the inputs are.
     """
 
-    serialised = json.dumps(list(parts), sort_keys=True, ensure_ascii=False, default=str)
+    serialised = json.dumps(
+        list(parts), sort_keys=True, ensure_ascii=False, default=str
+    )
     return hashlib.sha256(serialised.encode("utf-8")).hexdigest()
 
 
@@ -110,14 +114,11 @@ def semantic_key(namespace: str, parts: list[Any], *, length: int = 32) -> str:
 
 
 class CacheBackend(Protocol):
-    def get(self, key: str) -> dict[str, Any] | None:
-        ...
+    def get(self, key: str) -> dict[str, Any] | None: ...
 
-    def set(self, key: str, value: dict[str, Any], ttl_seconds: int) -> None:
-        ...
+    def set(self, key: str, value: dict[str, Any], ttl_seconds: int) -> None: ...
 
-    def clear(self) -> None:
-        ...
+    def clear(self) -> None: ...
 
 
 class NoopCache:
@@ -147,117 +148,66 @@ class InMemoryCache:
     """
 
     def __init__(self, max_entries: int = 1024) -> None:
+        self._lock = threading.RLock()
         self._max = max_entries
         self._store: "OrderedDict[str, _Entry]" = OrderedDict()
 
     def get(self, key: str) -> dict[str, Any] | None:
-        entry = self._store.get(key)
-        if entry is None:
-            return None
-        if entry.expires_at <= time.time():
-            self._store.pop(key, None)
-            return None
-        # Refresh recency on read
-        self._store.move_to_end(key)
-        return dict(entry.value)
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            if entry.expires_at <= time.time():
+                self._store.pop(key, None)
+                return None
+            # Refresh recency on read
+            self._store.move_to_end(key)
+            return deepcopy(entry.value)
 
     def set(self, key: str, value: dict[str, Any], ttl_seconds: int) -> None:
-        if ttl_seconds <= 0:
-            return
-        self._store[key] = _Entry(value=dict(value), expires_at=time.time() + ttl_seconds)
-        self._store.move_to_end(key)
-        while len(self._store) > self._max:
-            self._store.popitem(last=False)
+        with self._lock:
+            if ttl_seconds <= 0:
+                return
+            self._store[key] = _Entry(
+                value=deepcopy(value), expires_at=time.time() + ttl_seconds
+            )
+            self._store.move_to_end(key)
+            while len(self._store) > self._max:
+                self._store.popitem(last=False)
 
     def clear(self) -> None:
-        self._store.clear()
+        with self._lock:
+            self._store.clear()
 
 
 class SingleFlight:
-    """Coalesce concurrent ``compute`` calls for the same key.
+    """Followers retain a Future; removing a key cannot race an existing waiter."""
 
-    Without singleflight, a cache miss followed by N parallel calls to
-    the same key would each fire the expensive ``compute`` callback —
-    wasting the work for all but the first. This wrapper makes sure
-    that within a process only one ``compute`` runs per key at a time;
-    concurrent callers wait for the leader's result and reuse it.
-
-    The implementation:
-
-    * Holds an ``RLock`` so ``get_or_compute`` is safe to call
-      re-entrantly from inside a ``compute`` callback.
-    * Tracks in-flight futures in a dict keyed by cache key.
-    * Cleans up the dict entry once the leader completes (success or
-      failure) so a subsequent call starts fresh.
-    * Does NOT touch the underlying cache — cache write/read policy is
-      the caller's responsibility. This keeps SingleFlight composable
-      with any ``CacheBackend`` and any caching decision (e.g. don't
-      cache failures).
-    """
-
-    def __init__(self, cache: CacheBackend | None = None) -> None:
+    def __init__(self, cache=None):
         self._cache = cache
         self._lock = threading.RLock()
-        self._inflight: dict[str, "threading.Event"] = {}
-        self._inflight_values: dict[str, dict[str, Any] | None] = {}
-        self._inflight_errors: dict[str, BaseException | None] = {}
+        self._inflight: dict[str, Future] = {}
 
-    def _wait_for(self, key: str) -> dict[str, Any]:
-        event = self._inflight.get(key)
-        if event is None:
-            raise RuntimeError("singleflight: missing in-flight entry")
-        event.wait()
-        err = self._inflight_errors.get(key)
-        if err is not None:
-            raise err
-        value = self._inflight_values.get(key)
-        if value is None:
-            # Leader stored nothing — treat as cache miss.
-            raise KeyError(key)
-        return value
-
-    def _publish(self, key: str, value: dict[str, Any] | None, error: BaseException | None) -> None:
+    def get_or_compute(self, key, compute):
         with self._lock:
-            self._inflight_values[key] = value
-            self._inflight_errors[key] = error
-            event = self._inflight.pop(key, None)
-        if event is not None:
-            event.set()
-
-    def get_or_compute(
-        self,
-        key: str,
-        compute: Callable[[], dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Return a cached value or run ``compute`` exactly once per key.
-
-        When a cached value is available in ``self._cache`` it is
-        returned without ever invoking ``compute``. Otherwise the first
-        caller becomes the leader, runs ``compute``, and the value is
-        broadcast to any waiters via a ``threading.Event``.
-        """
-
-        if self._cache is not None:
-            cached = self._cache.get(key)
-            if cached is not None:
-                return cached
-
-        with self._lock:
-            if key in self._inflight:
-                is_leader = False
-            else:
-                self._inflight[key] = threading.Event()
-                is_leader = True
-
-        if not is_leader:
-            return self._wait_for(key)
-
-        # Leader path — run the compute and broadcast to followers.
+            if self._cache is not None:
+                value = self._cache.get(key)
+                if value is not None:
+                    return deepcopy(value)
+            future = self._inflight.get(key)
+            leader = future is None
+            if leader:
+                future = Future()
+                self._inflight[key] = future
+        if not leader:
+            return deepcopy(future.result())
         try:
             value = compute()
+            future.set_result(deepcopy(value))
+            return value
         except BaseException as exc:
-            self._publish(key, None, exc)
+            future.set_exception(exc)
             raise
-
-        self._publish(key, value, None)
-        return value
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)

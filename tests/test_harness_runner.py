@@ -1,4 +1,4 @@
-﻿from agenthub import HarnessRunner
+from agenthub import HarnessRunner
 from agenthub.adapters.base import AgentResult, AgentTask
 from agenthub.domain.run import RunContext
 from agenthub.domain.run import RunResult
@@ -44,7 +44,9 @@ def test_harness_runner_dispatches_ui_request_through_adapters() -> None:
         "preview",
         "review",
     ]
-    assert result.events[1].payload["steps"][0]["tools"] == ["preview_tool"]
+    assert next(e for e in result.events if e.type == "run.planned").payload["steps"][
+        0
+    ]["tools"] == ["preview_tool"]
     assert "run.planned" in [event.type for event in result.events]
 
 
@@ -57,7 +59,7 @@ class FailingAdapter:
         raise RuntimeError("boom")
 
 
-def test_harness_runner_uses_fallback_when_adapter_fails() -> None:
+def test_harness_runner_reports_primary_failure_without_mock_fallback() -> None:
     runner = HarnessRunner(adapters={"orchestrator": FailingAdapter()})
     result = runner.run(
         RunContext(
@@ -68,8 +70,8 @@ def test_harness_runner_uses_fallback_when_adapter_fails() -> None:
         )
     )
 
-    assert result.status == "success"
-    assert "Primary adapter failed" in result.messages[0]["content"]
+    assert result.status == "failed"
+    assert "boom" in result.messages[0]["content"]
 
 
 def test_harness_runner_marks_parallel_agent_events() -> None:
@@ -98,7 +100,5 @@ def test_harness_runner_maps_prompt_for_ui_builder_tool_mentions() -> None:
     )
 
     assert result.status == "success"
-    assert any(artifact["type"] == "code" for artifact in result.artifacts)
-    assert "build a profile card" in result.artifacts[0]["content"]
-
-
+    assert any(artifact["type"] == "document" for artifact in result.artifacts)
+    assert any("build a profile card" in a["content"] for a in result.artifacts)

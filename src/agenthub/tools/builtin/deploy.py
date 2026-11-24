@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from html import escape
 from pathlib import Path
+from agenthub.infrastructure.config.paths import data_root
 from uuid import uuid4
 
+from agenthub.sandbox import current_sandbox
 from agenthub.tools.schemas import ToolResult
 
 
-DEPLOYMENT_DIR = Path("agent-workspace/deployments")
+DEPLOYMENT_DIR = data_root() / "deployments"
 
 
 def deploy_tool(
@@ -18,9 +20,8 @@ def deploy_tool(
 ) -> ToolResult:
     deployment_id = f"dep_{uuid4().hex[:12]}"
     target_dir = DEPLOYMENT_DIR / deployment_id
-    target_dir.mkdir(parents=True, exist_ok=True)
     html = preview_html or _html_from_code(title, code)
-    (target_dir / "index.html").write_text(html, encoding="utf-8")
+    _write_deployment(target_dir / "index.html", html)
     preview_url = f"/deployments/{deployment_id}/index.html"
     logs = (
         f"Deployment {deployment_id} completed.\n"
@@ -39,6 +40,21 @@ def deploy_tool(
             "deployment_url": preview_url,
         },
     )
+
+
+def _write_deployment(target: Path, html: str) -> None:
+    """Write through the run's sandbox when one is bound.
+
+    Deploy is an L3 tool: it only ever runs as an approved step, and the
+    write is recorded in the sandbox audit trail alongside everything
+    else that step did.
+    """
+    sandbox = current_sandbox()
+    if sandbox is not None:
+        sandbox.write_path(target, html)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(html, encoding="utf-8")
 
 
 def _html_from_code(title: str, code: str) -> str:

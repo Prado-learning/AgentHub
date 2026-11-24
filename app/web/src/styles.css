@@ -2709,6 +2709,15 @@ button:disabled {
   border-radius: 6px;
 }
 
+.pending-sandbox {
+  margin: 0;
+  font-size: 11px;
+  color: #1b4f72;
+  background: rgba(255, 255, 255, 0.45);
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
 .pending-actions {
   display: flex;
   gap: 6px;
@@ -2983,3 +2992,22 @@ button:disabled {
   color: #c0392b;
 }
 
+
+/* Run controls must stay readable in the narrow workspace sidebars. */
+.status-row { flex-wrap: wrap; justify-content: flex-start; align-items: center; }
+.status-row > * { flex: 0 0 auto; white-space: nowrap; }
+.status-row .status-chip { padding: 6px 9px; font-size: 12px; }
+.pending-confirmation-card { min-width: 0; max-width: 100%; align-self: start; overflow-wrap: anywhere; }
+.pending-confirmation-card > * { min-width: 0; }
+.pending-confirmation-card pre { max-width: 100%; max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pending-confirmation-header { flex-wrap: wrap; }
+.pending-meta { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.pending-meta > div { min-width: 0; }
+.pending-confirmation-card p { margin: 4px 0; }
+.active-run { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.active-run span { overflow-wrap: anywhere; }
+.active-run button { border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; cursor: pointer; }
+.editor-card > .diff-viewer { min-height: 0; overflow: auto; }
+
+.right-content { min-width: 0; overflow-y: auto; }
+.right-content > .side-card:has(.approvals-header) { min-width: 0; align-content: start; grid-auto-rows: max-content; }

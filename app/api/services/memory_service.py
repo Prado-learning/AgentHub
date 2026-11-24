@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from agenthub.infrastructure.config.paths import runtime_dir, data_root
 from uuid import uuid4
 
 from app.api.services.conversation_store import JsonStore
@@ -10,7 +11,7 @@ from app.api.services.llm_service import build_required_llm_provider, complete_j
 from agenthub.runtime.prompt_builder import format_messages_for_prompt
 
 
-RUNTIME_DIR = Path("agent-workspace/runtime")
+RUNTIME_DIR = runtime_dir()
 MEMORIES = JsonStore(RUNTIME_DIR / "conversation_memories.json")
 ALLOWED_CATEGORIES = {"preference", "constraint", "decision", "goal", "open_task"}
 SECRET_PATTERN = re.compile(
@@ -66,8 +67,11 @@ def extract_memories_with_llm(
 
     def _mutate(records: list[dict]) -> list[dict] | None:
         existing_keys = {
-            _memory_key(str(memory.get("category") or ""), str(memory.get("content") or ""))
+            _memory_key(
+                str(memory.get("category") or ""), str(memory.get("content") or "")
+            )
             for memory in records
+            if memory.get("conversation_id") == conversation_id
         }
         new_memories: list[dict] = []
         for candidate in candidates[:8]:
@@ -106,7 +110,9 @@ def extract_memories_with_llm(
     return created
 
 
-def _memory_prompt(source_message: dict, history: list[dict], existing: list[dict]) -> str:
+def _memory_prompt(
+    source_message: dict, history: list[dict], existing: list[dict]
+) -> str:
     return (
         "Extract only durable, useful memories for future turns in this conversation.\n"
         "The user deliberately requested smart memory extraction from the source message, "

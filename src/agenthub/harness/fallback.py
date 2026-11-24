@@ -11,18 +11,16 @@ from agenthub.domain.run import RunContext
 
 
 def _default_fallback_factories() -> list[Callable[[str], AgentAdapter]]:
-    return [
-        lambda agent_id: MockAgentAdapter(agent_id=agent_id, name=f"{agent_id} fallback")
-    ]
+    # Demo adapters must be selected explicitly, never hide a real provider failure.
+    return []
 
 
 @dataclass
 class FallbackChain:
     """Tries fallback adapters in order when a primary adapter fails.
 
-    The default chain degrades to a mock agent so a run can still finish
-    with a usable response when the configured provider is unavailable.
-    Append additional factories to try another real provider first.
+    The default chain is empty. Explicit factories can provide real-provider
+    fallback; failures otherwise remain failures.
     """
 
     adapter_factories: list[Callable[[str], AgentAdapter]] = field(

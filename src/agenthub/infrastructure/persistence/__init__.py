@@ -1,4 +1,3 @@
-﻿from app.api.services.conversation_store import JsonStore
+from agenthub.infrastructure.persistence.json_store import JsonStore
 
 __all__ = ["JsonStore"]
-

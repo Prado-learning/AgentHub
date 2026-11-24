@@ -20,7 +20,7 @@ from agenthub.domain.authority import AuthorityTier
 from agenthub.domain.plan import Plan, PlanStep
 from agenthub.domain.run import RunContext
 from agenthub.harness.runner import HarnessRunner
-from agenthub.tracing.tracer import FlowTracer
+from agenthub.harness.tracing import FlowTracer
 
 
 def _build_context() -> RunContext:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -21,6 +21,7 @@ class AgentResult:
     artifacts: list[dict] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)
     error: str | None = None
+    metrics: dict = field(default_factory=dict)
 
 
 class AgentAdapter(Protocol):
@@ -28,7 +29,4 @@ class AgentAdapter(Protocol):
     name: str
     capabilities: list[str]
 
-    def run(self, task: AgentTask, context: RunContext) -> AgentResult:
-        ...
-
-
+    def run(self, task: AgentTask, context: RunContext) -> AgentResult: ...

@@ -16,6 +16,7 @@ import type {
   StructuredDiff,
   ToolOption,
   ToolPreferences,
+  TraceEvent,
 } from "./types";
 
 const API_PREFIX = "/api";
@@ -58,8 +59,8 @@ export function sendChatMessage(
   toolPreferences?: ToolPreferences,
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
-  return postJSON<ChatResponse>(
-    "/chat",
+  return runChat(
+    "/chat/start",
     {
       conversation_id: conversationId,
       message: {
@@ -91,8 +92,8 @@ export function regenerateChatMessage(
   toolPreferences?: ToolPreferences,
   signal?: AbortSignal,
 ): Promise<ChatResponse> {
-  return postJSON<ChatResponse>(
-    "/chat/regenerate",
+  return runChat(
+    "/chat/start",
     {
       conversation_id: conversationId,
       message: {
@@ -356,7 +357,7 @@ export async function deleteConversationMemory(
   return data.memory;
 }
 
-export async function applyArtifactDiff(artifactId: string): Promise<{
+export async function applyArtifactDiff(artifactId: string, reviewToken: string, hunkIds: string[]): Promise<{
   id: string;
   artifact_id: string;
   changed_files: string[];
@@ -369,7 +370,7 @@ export async function applyArtifactDiff(artifactId: string): Promise<{
       changed_files: string[];
       status: string;
     };
-  }>(`/artifacts/${artifactId}/apply`, { method: "POST" });
+  }>(`/artifacts/${artifactId}/apply`, { method: "POST", body: JSON.stringify({review_token: reviewToken, hunk_ids: hunkIds}) });
   return data.application;
 }
 
@@ -404,18 +405,8 @@ export async function getArtifactDiff(artifactId: string): Promise<StructuredDif
   return request<StructuredDiff>(`/artifacts/${artifactId}/diff`);
 }
 
-export function runWorkflowArtifact(
-  artifactId: string,
-  modelProvider?: string,
-  modelName?: string,
-): Promise<ChatResponse> {
-  return request<ChatResponse>(`/artifacts/${artifactId}/run`, {
-    method: "POST",
-    body: JSON.stringify({
-      model_provider: modelProvider,
-      model_name: modelName,
-    }),
-  });
+export function runWorkflowArtifact(artifactId: string, modelProvider?: string, modelName?: string, signal?: AbortSignal): Promise<ChatResponse> {
+  return runChat(`/artifacts/${artifactId}/start`, {model_provider:modelProvider,model_name:modelName},signal);
 }
 
 export async function listPendingDecisions(): Promise<PendingDecision[]> {
@@ -437,7 +428,7 @@ export async function listPendingDecisionsForRun(
 export async function confirmRunStep(
   runId: string,
   stepId: string,
-  input: { actor?: string; note?: string } = {},
+  input: { actor?: string; note?: string; fingerprint: string },
 ): Promise<PendingDecision> {
   const data = await request<{ decision: PendingDecision }>(
     `/runs/${runId}/steps/${stepId}/confirm`,
@@ -452,7 +443,7 @@ export async function confirmRunStep(
 export async function declineRunStep(
   runId: string,
   stepId: string,
-  input: { actor?: string; reason?: string } = {},
+  input: { actor?: string; reason?: string; fingerprint: string },
 ): Promise<PendingDecision> {
   const data = await request<{ decision: PendingDecision }>(
     `/runs/${runId}/steps/${stepId}/decline`,
@@ -467,4 +458,32 @@ export async function declineRunStep(
 export async function getDebugTrace(runId: string): Promise<DebugStage[]> {
   const data = await request<{ stages: DebugStage[] }>(`/runs/${runId}/debug-trace`);
   return data.stages;
+}
+
+async function runChat(path: string, body: unknown, signal?: AbortSignal): Promise<ChatResponse> {
+  // Always receive the run id so cancelling the browser request cannot orphan a run.
+  const started = await postJSON<{run_id: string; conversation_id: string}>(path, body);
+  const conversationId = started.conversation_id;
+  const events: TraceEvent[] = [];
+  let cursor = 0;
+  for (;;) {
+    if (signal?.aborted) {
+      await postJSON(`/runs/${started.run_id}/cancel`, {});
+      throw new DOMException("Cancellation requested", "AbortError");
+    }
+    const state = await request<{status: string; error?: string; response?: ChatResponse; cursor: number; events: TraceEvent[]}>(`/runs/${started.run_id}?after=${cursor}`);
+    events.push(...state.events);
+    cursor = state.cursor;
+    window.dispatchEvent(new CustomEvent("agenthub:run-progress", {detail: {conversationId, runId: started.run_id, status: state.status, events: [...events]}}));
+    if (!["queued", "running", "cancelling"].includes(state.status)) {
+      if (state.response) return state.response;
+      if (state.status === "cancelled") throw new DOMException("Run cancelled", "AbortError");
+      throw new Error(state.error || `Run ended: ${state.status}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
+
+export async function listConversationRuns(conversationId: string): Promise<Array<{run_id:string;status:string}>> {
+  return (await request<{runs:Array<{run_id:string;status:string}>}>(`/runs?conversation_id=${encodeURIComponent(conversationId)}`)).runs;
 }

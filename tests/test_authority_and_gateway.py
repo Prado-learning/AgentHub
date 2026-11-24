@@ -19,11 +19,12 @@ from agenthub.gateway import (
     NoopSigner,
     cache_key,
 )
+from agenthub.gateway.gateway import CachingGateway
 from agenthub.harness.runner import HarnessRunner
 from agenthub.orchestration.rule_planner import infer_authority
 from agenthub.tools.registry import ToolRegistry
 from agenthub.tools.executor import ToolExecutor
-from agenthub.tracing import FlowTracer
+from agenthub.harness.tracing import FlowTracer
 
 
 # ---------------------------------------------------------------------------
@@ -33,15 +34,17 @@ from agenthub.tracing import FlowTracer
 
 def test_infer_authority_picks_highest_tier() -> None:
     assert infer_authority(["file_reader_tool"]) is AuthorityTier.L1_READONLY
-    assert infer_authority(["preview_tool"]) is AuthorityTier.L2_REVERSIBLE
+    assert infer_authority(["preview_tool"]) is AuthorityTier.L1_READONLY
     assert infer_authority(["deploy_tool"]) is AuthorityTier.L3_IRREVERSIBLE
     assert (
-        infer_authority(["file_reader_tool", "preview_tool"]) is AuthorityTier.L2_REVERSIBLE
+        infer_authority(["file_reader_tool", "preview_tool"])
+        is AuthorityTier.L1_READONLY
     )
     assert (
-        infer_authority(["file_reader_tool", "deploy_tool"]) is AuthorityTier.L3_IRREVERSIBLE
+        infer_authority(["file_reader_tool", "deploy_tool"])
+        is AuthorityTier.L3_IRREVERSIBLE
     )
-    assert infer_authority(["unknown_tool"]) is AuthorityTier.L1_READONLY
+    assert infer_authority(["unknown_tool"]) is AuthorityTier.L3_IRREVERSIBLE
 
 
 def test_authority_tiers_carry_through_run_result(
@@ -60,10 +63,12 @@ def test_authority_tiers_carry_through_run_result(
         )
     )
 
-    planned = next(trace for trace in runner.debug_trace if trace.stage_id == "run.planned")
+    planned = next(
+        trace for trace in runner.debug_trace if trace.stage_id == "run.planned"
+    )
     steps_by_agent = {step["agent_id"]: step for step in planned.inputs["steps"]}
     # UI builder uses preview_tool → L2
-    assert steps_by_agent["ui_builder"]["authority"] == "L2"
+    assert steps_by_agent["ui_builder"]["authority"] == "L1"
     # code_reviewer uses code_review_tool → L1
     assert steps_by_agent["code_reviewer"]["authority"] == "L1"
 
@@ -73,7 +78,7 @@ def test_authority_tiers_carry_through_run_result(
     )
     assert summary is not None
     assert "authority_tiers" in summary.payload
-    assert "L1" in summary.payload["authority_tiers"]
+    assert "L1" in summary.payload["authority_tiers"].values()
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +110,9 @@ def test_tool_failure_does_not_abort_step(
         tool_executor=executor,
         tracer=FlowTracer(enabled=True),
         limits=__import__("agenthub.harness.limits", fromlist=["RunLimits"]).RunLimits(
-            run_policy=__import__("agenthub.policies", fromlist=["RunPolicy"]).RunPolicy(
-                max_steps=8
-            )
+            run_policy=__import__(
+                "agenthub.policies", fromlist=["RunPolicy"]
+            ).RunPolicy(max_steps=8)
         ),
     )
 
@@ -115,7 +120,8 @@ def test_tool_failure_does_not_abort_step(
     # permission check fails before the tool itself gets a chance to
     # throw — which is still a useful failure to test, but we want to
     # exercise the *execution* path here.
-    from agenthub.application.agents.runtime_profile import AgentRuntimeProfile
+    from agenthub.agent.runtime_profile import AgentRuntimeProfile
+
     runner.agent_profiles = {
         "orchestrator": AgentRuntimeProfile(
             id="orchestrator",
@@ -128,6 +134,13 @@ def test_tool_failure_does_not_abort_step(
     from agenthub.domain.plan import Plan, PlanStep
     from agenthub.domain.authority import AuthorityTier
 
+    monkeypatch.setitem(
+        __import__(
+            "agenthub.orchestration.rule_planner", fromlist=["_TOOL_AUTHORITY"]
+        )._TOOL_AUTHORITY,
+        "boom_tool",
+        AuthorityTier.L1_READONLY,
+    )
     boom_step = PlanStep(
         id="step_boom",
         agent_id="orchestrator",
@@ -137,7 +150,10 @@ def test_tool_failure_does_not_abort_step(
     )
 
     from agenthub.adapters.mock.adapter import MockAgentAdapter
-    runner.adapters = {"orchestrator": MockAgentAdapter(agent_id="orchestrator", name="Orch")}
+
+    runner.adapters = {
+        "orchestrator": MockAgentAdapter(agent_id="orchestrator", name="Orch")
+    }
 
     class _StubOrchestrator:
         def __init__(self, **_kwargs):  # noqa: ANN001
@@ -146,9 +162,7 @@ def test_tool_failure_does_not_abort_step(
         def plan(self, _context):  # noqa: ANN001
             return Plan(steps=[boom_step], reason="stub")
 
-    monkeypatch.setattr(
-        "agenthub.harness.runner.Orchestrator", _StubOrchestrator
-    )
+    monkeypatch.setattr("agenthub.harness.runner.Orchestrator", _StubOrchestrator)
 
     result = runner.run(
         RunContext(
@@ -192,9 +206,9 @@ def test_is_final_short_circuit_skips_remaining_steps(
     runner = HarnessRunner(
         tracer=FlowTracer(enabled=True),
         limits=__import__("agenthub.harness.limits", fromlist=["RunLimits"]).RunLimits(
-            run_policy=__import__("agenthub.policies", fromlist=["RunPolicy"]).RunPolicy(
-                max_steps=12
-            )
+            run_policy=__import__(
+                "agenthub.policies", fromlist=["RunPolicy"]
+            ).RunPolicy(max_steps=12)
         ),
     )
 
@@ -350,7 +364,14 @@ class _CountingAdapter:
         return AgentResult(
             agent_id=self.id,
             status="success",
-            messages=[{"role": "agent", "sender": self.id, "content": task.instruction, "format": "markdown"}],
+            messages=[
+                {
+                    "role": "agent",
+                    "sender": self.id,
+                    "content": task.instruction,
+                    "format": "markdown",
+                }
+            ],
         )
 
 
@@ -375,7 +396,7 @@ def test_noop_gateway_passes_through() -> None:
 def test_gateway_with_in_memory_cache_dedupes_repeat_calls() -> None:
     adapter = _CountingAdapter()
     cache = InMemoryCache()
-    gateway = NoopGateway(cache=cache)
+    gateway = CachingGateway(cache=cache)
 
     dispatch = GatewayDispatch(
         endpoint="adapter:counter",
@@ -476,7 +497,9 @@ def test_l2_step_emits_confirmation_event_and_flags_completion(
     )
 
     # Signal 1: a confirmation event was emitted with the step id.
-    confirmations = [e for e in result.events if e.type == "authority.requires_confirmation"]
+    confirmations = [
+        e for e in result.events if e.type == "authority.requires_confirmation"
+    ]
     assert len(confirmations) == 1
     payload = confirmations[0].payload
     assert payload["step_id"] == "ui_render"
@@ -485,9 +508,8 @@ def test_l2_step_emits_confirmation_event_and_flags_completion(
 
     # Signal 2: agent.completed is flagged.
     completions = [e for e in result.events if e.type == "agent.completed"]
-    assert completions, result.events
-    assert completions[-1].payload["requires_user_confirmation"] is True
-    assert completions[-1].payload["authority"] == "L2"
+    assert not completions  # No action has executed before approval.
+    assert result.status == "waiting_approval"
 
     # Signal 3: run.completed carries the queue.
     completed = [e for e in result.events if e.type == "run.completed"]
@@ -517,7 +539,9 @@ def test_l1_step_does_not_emit_confirmation_signal(
 
     runner = HarnessRunner(
         tracer=FlowTracer(enabled=True),
-        adapters={"code_reviewer": MockAgentAdapter(agent_id="code_reviewer", name="Rev")},
+        adapters={
+            "code_reviewer": MockAgentAdapter(agent_id="code_reviewer", name="Rev")
+        },
     )
 
     from agenthub.domain.plan import Plan, PlanStep
@@ -554,7 +578,9 @@ def test_l1_step_does_not_emit_confirmation_signal(
         )
     )
 
-    confirmations = [e for e in result.events if e.type == "authority.requires_confirmation"]
+    confirmations = [
+        e for e in result.events if e.type == "authority.requires_confirmation"
+    ]
     assert confirmations == []
 
     completions = [e for e in result.events if e.type == "agent.completed"]
@@ -587,9 +613,9 @@ def test_failed_l2_step_does_not_ask_for_confirmation(
     runner = HarnessRunner(
         tracer=FlowTracer(enabled=True),
         adapters={"doomed": _BoomAdapter()},
-        fallback=__import__("agenthub.harness.fallback", fromlist=["FallbackChain"]).FallbackChain(
-            adapter_factories=[]
-        ),
+        fallback=__import__(
+            "agenthub.harness.fallback", fromlist=["FallbackChain"]
+        ).FallbackChain(adapter_factories=[]),
     )
 
     from agenthub.domain.plan import Plan, PlanStep
@@ -626,9 +652,10 @@ def test_failed_l2_step_does_not_ask_for_confirmation(
         )
     )
 
-    assert [e.type for e in result.events].count("authority.requires_confirmation") == 0
+    assert [e.type for e in result.events].count("authority.requires_confirmation") == 1
+    assert not any(e.type == "agent.started" for e in result.events)
     completed = [e for e in result.events if e.type == "run.completed"][-1]
-    assert completed.payload["pending_confirmation_steps"] == []
+    assert len(completed.payload["pending_confirmation_steps"]) == 1
 
 
 def test_summary_message_lists_pending_confirmation_steps(
@@ -681,5 +708,5 @@ def test_summary_message_lists_pending_confirmation_steps(
     )
 
     summary = result.messages[-1]
-    assert "Awaiting your confirmation" in summary["content"]
-    assert "ui_builder (L2)" in summary["content"]
+    assert "Review the pending action" in summary["content"]
+    assert "ui_builder" in summary["content"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from agenthub.application.agents.definition_loader import load_agent_configs
+from agenthub.agent.definition_loader import load_agent_configs
 
 
 @dataclass(frozen=True)

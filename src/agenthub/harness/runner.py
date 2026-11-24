@@ -1,45 +1,21 @@
-"""Multi-agent run execution.
+"""One checkpointable execution engine for chat and workflow plans.
 
-The HarnessRunner owns execution: scheduling plan steps (parallel where
-allowed), invoking agent adapters, enforcing permissions and run limits,
-degrading through fallback adapters, and aggregating artifacts. Planning
-itself lives in ``agenthub.orchestration``.
-
-Phase 2 / Phase 3 additions (over the article's ``确定性 Harness``):
-
-- Every step runs inside a :class:`FlowTracer` stage; tool calls run
-  inside a nested stage. With ``AGENT_DEBUG=0`` (the default) the
-  tracer is a no-op and the overhead is a single boolean check.
-- Tool failures no longer abort the whole step. They log a
-  ``tool.failed`` event and let the rest of the tools run, matching
-  the article's "single-step failure does not block the run" rule.
-- A step that runs with ``can_short_circuit=True`` (set by the
-  planner for single-chat orchestrator calls) marks its result as
-  ``final=True`` on success; the main loop then skips every
-  remaining pending step with reason ``earlier step produced final
-  answer``.
-- Adapter calls flow through an injectable :class:`Gateway`. The
-  default is :class:`NoopGateway`, a transparent pass-through.
-- Each step carries an :class:`AuthorityTier` (``L1/L2/L3``) chosen
-  by the planner. The harness records the tier in the trace and in
-  the final summary; L2/L3 steps still execute for now (the gate is
-  pluggable, not enforced) but the audit trail is in place.
-- L2/L3 completions emit an ``authority.requires_confirmation``
-  event and flag their ``agent.completed`` payload with
-  ``requires_user_confirmation=True``. The ``run.completed`` payload
-  carries a ``pending_confirmation_steps`` array so the front end
-  can render the approval queue without re-parsing the trace.
+The engine has no dependency on the HTTP application or its persistence services.
+Callbacks persist events/checkpoints; callers supply exact-action approvals.
 """
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from threading import RLock
+from typing import Any, Callable
 from uuid import uuid4
 
 from agenthub.adapters import AgentAdapter, AgentTask, build_agent_adapters
 from agenthub.adapters.base import AgentResult
-from agenthub.application.agents.runtime_profile import (
+from agenthub.agent.runtime_profile import (
     AgentRuntimeProfile,
     load_agent_runtime_profiles,
 )
@@ -48,20 +24,31 @@ from agenthub.artifacts.builders.artifact_builder import (
     tool_result_to_artifact,
 )
 from agenthub.artifacts.conflict_resolver import resolve_artifact_conflicts
-from agenthub.domain.authority import AuthorityDecision, AuthorityTier
-from agenthub.domain.plan import PlanStep
+from agenthub.domain.authority import AuthorityTier
+from agenthub.domain.plan import Plan, PlanStep
 from agenthub.domain.run import RunContext, RunEvent, RunResult
 from agenthub.domain.trace import StageTrace
 from agenthub.gateway import Gateway, build_default_gateway
-from agenthub.harness.authority_gate import AuthorityGate, GateAction, permissive_gate
+from agenthub.gateway.gateway import GatewayDispatch
+from agenthub.harness.authority_gate import AuthorityGate, GateAction
+from agenthub.harness.control import (
+    RunControl,
+    RunCancelled,
+    BudgetExceeded,
+    execution_scope,
+)
 from agenthub.harness.fallback import FallbackChain
+from agenthub.harness.fingerprint import action_fingerprint
 from agenthub.harness.limits import RunLimits
 from agenthub.harness.permission import ensure_tool_allowed, tool_policy_for
-from agenthub.orchestration.rule_planner import Orchestrator
-from agenthub.policies import AgentPolicy
+from agenthub.orchestration.rule_planner import Orchestrator, infer_authority
+from agenthub.policies import AgentPolicy, SandboxPolicy
+from agenthub.sandbox import Sandbox, sandbox_scope
+from agenthub.sandbox.manager import SandboxManager
+from agenthub.sandbox.profiles import run_spec
 from agenthub.tools.executor import ToolExecutor
 from agenthub.tools.input_mapper import tool_kwargs_for
-from agenthub.tracing import FlowTracer
+from agenthub.harness.tracing import FlowTracer
 
 
 @dataclass(frozen=True)
@@ -76,10 +63,19 @@ class StepExecutionResult:
     authority: AuthorityTier = AuthorityTier.L1_READONLY
 
 
+def plan_from_dict(value: dict) -> Plan:
+    return Plan(
+        steps=[
+            PlanStep(**{**s, "authority": AuthorityTier(s.get("authority", "L1"))})
+            for s in value["steps"]
+        ],
+        reason=value.get("reason", "saved plan"),
+    )
+
+
 @dataclass
 class HarnessRunner:
-    """Coordinates a complete multi-agent run for one user message."""
-
+    planner_provider: Any = None
     mode: str = "mock"
     adapters: dict[str, AgentAdapter] = field(default_factory=build_agent_adapters)
     tool_executor: ToolExecutor = field(default_factory=ToolExecutor)
@@ -90,488 +86,670 @@ class HarnessRunner:
         default_factory=load_agent_runtime_profiles
     )
     agent_policy: AgentPolicy = field(default_factory=AgentPolicy)
+    sandbox_policy: SandboxPolicy = field(default_factory=SandboxPolicy)
     fallback: FallbackChain = field(default_factory=FallbackChain)
     tracer: FlowTracer = field(default_factory=FlowTracer)
     gateway: Gateway = field(default_factory=build_default_gateway)
-    authority_gate: AuthorityGate = field(default_factory=permissive_gate)
+    authority_gate: AuthorityGate = field(default_factory=AuthorityGate)
+    control: RunControl = field(default_factory=RunControl)
+    sandbox: Sandbox | None = None
+    sandbox_manager: SandboxManager | None = None
+    on_event: Callable[[RunEvent], None] | None = None
+    on_checkpoint: Callable[[dict], None] | None = None
     _current_run_id: str | None = None
+    _active_sandbox: Sandbox | None = None
+    _event_lock: RLock = field(default_factory=RLock)
 
     @property
     def max_parallel_steps(self) -> int:
         return self.limits.max_parallel_steps
 
-    def run(self, context: RunContext) -> RunResult:
+    def _normalize_step(self, step: PlanStep) -> PlanStep:
+        tier = max(
+            step.authority, infer_authority(step.tools), key=lambda value: value.value
+        )
+        if getattr(self.adapters.get(step.agent_id), "side_effecting", False):
+            tier = max(tier, AuthorityTier.L2_REVERSIBLE, key=lambda value: value.value)
+        return replace(step, authority=tier)
+
+    def run(
+        self,
+        context: RunContext,
+        *,
+        plan: Plan | None = None,
+        checkpoint: dict | None = None,
+        approvals: dict[str, str] | None = None,
+        rejected: set[str] | None = None,
+        run_id: str | None = None,
+    ) -> RunResult:
+        checkpoint = checkpoint or {}
+        self.control.llm_calls = max(
+            self.control.llm_calls, int(checkpoint.get("llm_calls", 0))
+        )
+        self.control.started = min(
+            self.control.started,
+            time.monotonic() - float(checkpoint.get("active_elapsed", 0)),
+        )
+        approvals = approvals or {}
+        rejected = rejected or set()
+        self._current_run_id = run_id or f"run_{uuid4().hex[:12]}"
         self.events = []
-        self.debug_trace = []
-        run_id = f"run_{uuid4().hex[:12]}"
-        self._current_run_id = run_id
-        run_events = [self._record_event("run.started", {"run_id": run_id, "conversation_id": context.conversation_id})]
-        self.tracer.record_lifecycle(
+        self.tracer = FlowTracer(enabled=self.tracer.enabled)
+        started = time.monotonic()
+        self._record_event(
             "run.started",
-            "Run started",
-            {"run_id": run_id, "conversation_id": context.conversation_id, "mode": context.mode},
+            {
+                "run_id": self._current_run_id,
+                "conversation_id": context.conversation_id,
+                "resumed": bool(checkpoint),
+            },
         )
-        available_agents = [
-            agent_id for agent_id in self.adapters if self.agent_policy.allows(agent_id)
-        ]
-        orchestrator = Orchestrator(
-            available_agent_ids=available_agents,
-            available_tool_ids=self.tool_executor.registry.list_ids(),
-            agent_profiles=self.agent_profiles,
+        self._record_event(
+            "context.loaded",
+            {
+                "history_count": len(context.history),
+                "attachment_count": len(context.attachments or []),
+                "workspace_dir": context.workspace_dir,
+            },
         )
-        plan = orchestrator.plan(context)
-        planned_payload = {
-            "reason": plan.reason,
-            "step_count": len(plan.steps),
-            "steps": [
-                {
-                    "id": step.id,
-                    "agent_id": step.agent_id,
-                    "task": step.task,
-                    "tools": step.tools,
-                    "depends_on": step.depends_on,
-                    "can_run_parallel": step.can_run_parallel,
-                    "authority": step.authority.value,
-                    "can_short_circuit": step.can_short_circuit,
-                }
-                for step in plan.steps
-            ],
-        }
-        run_events.append(self._record_event("run.planned", planned_payload))
-        self.tracer.record_lifecycle("run.planned", "Run planned", planned_payload)
-
-        step_results: dict[str, StepExecutionResult] = {}
-        messages: list[dict] = []
-        raw_artifacts: list[dict] = []
-        pending = {step.id: step for step in plan.steps}
-        steps_executed = 0
-        early_final_step: str | None = None
-
-        while pending:
-            ready = [
-                step
-                for step in pending.values()
-                if all(dep in step_results for dep in step.depends_on)
+        if plan is None:
+            if checkpoint.get("plan"):
+                plan = plan_from_dict(checkpoint["plan"])
+            else:
+                with execution_scope(self.control, self._record_event):
+                    plan = Orchestrator(
+                        available_agent_ids=[
+                            a for a in self.adapters if self.agent_policy.allows(a)
+                        ],
+                        available_tool_ids=self.tool_executor.registry.list_ids(),
+                        agent_profiles=self.agent_profiles,
+                        planner_provider=self.planner_provider,
+                    ).plan(context)
+        expanded = []
+        for step in plan.steps:
+            effects = [
+                t
+                for t in step.tools
+                if infer_authority([t]) != AuthorityTier.L1_READONLY
             ]
-            if not ready:
-                for step in pending.values():
-                    result = self._skipped_result(step, "unresolved dependencies")
-                    step_results[step.id] = result
-                    messages.extend(result.messages)
-                    run_events.append(
-                        self._record_event(
-                            "agent.skipped",
-                            {"step_id": step.id, "agent_id": step.agent_id, "reason": result.error},
-                        )
-                    )
-                break
-
-            if early_final_step is not None:
-                reason = f"earlier step {early_final_step} produced final answer"
-                for step in pending.values():
-                    result = self._skipped_result(step, reason)
-                    step_results[step.id] = result
-                    messages.extend(result.messages)
-                    run_events.append(
-                        self._record_event(
-                            "agent.skipped",
-                            {"step_id": step.id, "agent_id": step.agent_id, "reason": result.error},
-                        )
-                    )
-                    self.tracer.record_lifecycle(
-                        f"agent.skipped.{step.id}",
-                        f"Step {step.id} skipped",
-                        {"reason": reason, "agent_id": step.agent_id},
-                    )
-                break
-
-            if not self.limits.allows_step(steps_executed):
-                for step in pending.values():
-                    result = self._skipped_result(step, "run step limit exceeded")
-                    step_results[step.id] = result
-                    messages.extend(result.messages)
-                    run_events.append(
-                        self._record_event(
-                            "agent.skipped",
-                            {"step_id": step.id, "agent_id": step.agent_id, "reason": result.error},
-                        )
-                    )
-                break
-
-            for step in ready:
-                pending.pop(step.id, None)
-
-            blocked = [
-                step
-                for step in ready
-                if any(step_results[dep].status != "success" for dep in step.depends_on)
-            ]
-            executable = [step for step in ready if step not in blocked]
-
-            for step in blocked:
-                result = self._skipped_result(step, "dependency failed")
-                step_results[step.id] = result
-                messages.extend(result.messages)
-                run_events.append(
-                    self._record_event(
-                        "agent.skipped",
-                        {"step_id": step.id, "agent_id": step.agent_id, "reason": result.error},
+            if step.kind == "agent" and effects:
+                prepare_id = step.id + "__prepare"
+                expanded.append(
+                    replace(
+                        step,
+                        id=prepare_id,
+                        tools=[t for t in step.tools if t not in effects],
+                        authority=AuthorityTier.L1_READONLY,
+                        can_short_circuit=False,
                     )
                 )
-
-            parallel_steps = [
-                step for step in executable if step.can_run_parallel and len(executable) > 1
-            ]
-            sequential_steps = [step for step in executable if step not in parallel_steps]
-            steps_executed += len(executable)
-
-            if parallel_steps:
-                run_events.extend(self._start_events(parallel_steps))
-                with ThreadPoolExecutor(
-                    max_workers=min(self.limits.max_parallel_steps, len(parallel_steps))
-                ) as executor:
-                    futures = {
-                        executor.submit(self._execute_step, step, context, [*raw_artifacts]): step
-                        for step in parallel_steps
-                    }
-                    for future in as_completed(futures):
-                        result = future.result()
-                        step_results[result.step_id] = result
-                        messages.extend(result.messages)
-                        raw_artifacts.extend(result.artifacts)
-                        run_events.append(self._completion_event(result))
-                        self._maybe_emit_confirmation(futures[future], result)
-
-            for step in sequential_steps:
-                run_events.extend(self._start_events([step]))
-                result = self._execute_step(step, context, raw_artifacts)
-                step_results[result.step_id] = result
-                messages.extend(result.messages)
-                raw_artifacts.extend(result.artifacts)
-                run_events.append(self._completion_event(result))
-                self._maybe_emit_confirmation(step, result)
-
-            # IsFinal detection: a successful step whose planner marked
-            # ``can_short_circuit=True`` ends the run.
-            for result in step_results.values():
-                if result.status == "success" and result.final and early_final_step is None:
-                    early_final_step = result.step_id
-                    self.tracer.record_lifecycle(
-                        "run.short_circuit",
-                        "Run short-circuited",
-                        {"step_id": result.step_id, "agent_id": result.agent_id},
+                expanded.append(
+                    replace(
+                        step,
+                        kind="tool",
+                        tools=effects,
+                        depends_on=[prepare_id],
+                        can_short_circuit=False,
                     )
-                    run_events.append(
-                        self._record_event(
-                            "run.short_circuit",
-                            {"step_id": result.step_id, "agent_id": result.agent_id},
-                        )
-                    )
-                    break
-
-        artifacts, conflicts = resolve_artifact_conflicts(raw_artifacts)
-        status = self._run_status(step_results)
-        pending_confirmation = [
-            {
-                "step_id": result.step_id,
-                "agent_id": result.agent_id,
-                "authority": result.authority.value,
-                "artifact_count": len(result.artifacts),
-            }
-            for result in step_results.values()
-            if result.status == "success"
-            and result.authority != AuthorityTier.L1_READONLY
-        ]
-        completed_payload = {
-            "conversation_id": context.conversation_id,
-            "agent_count": len(plan.steps),
-            "artifact_count": len(artifacts),
-            "conflict_count": len(conflicts),
-            "status": status,
-            "short_circuited": early_final_step is not None,
-            "short_circuit_step": early_final_step,
-            "authority_tiers": sorted({r.authority.value for r in step_results.values()}),
-            "pending_confirmation_steps": pending_confirmation,
-            "requires_user_confirmation": bool(pending_confirmation),
-        }
-        run_events.append(self._record_event("run.completed", completed_payload))
-        self.tracer.record_lifecycle("run.completed", "Run completed", completed_payload)
-        run_events.append(
-            self._record_event("run.metrics", self._build_run_metrics(plan, step_results, artifacts))
+                )
+            else:
+                expanded.append(step)
+        plan = Plan(
+            steps=[self._normalize_step(s) for s in expanded], reason=plan.reason
         )
-        self.tracer.record_lifecycle(
-            "run.metrics",
-            "Run metrics",
-            self._build_run_metrics(plan, step_results, artifacts),
+        self._validate_plan(plan)
+        self._dependency_map = {s.id: s.depends_on for s in plan.steps}
+        # Resolved after planning so the sandbox policy can see which
+        # authority tiers the plan actually contains.
+        self._active_sandbox, owned_sandbox = self._resolve_sandbox(context, plan)
+        self._record_event(
+            "run.planned",
+            {
+                "reason": plan.reason,
+                "step_count": len(plan.steps),
+                "steps": [asdict(s) for s in plan.steps],
+            },
+        )
+        results = {
+            key: StepExecutionResult(
+                **{**value, "authority": AuthorityTier(value.get("authority", "L1"))}
+            )
+            for key, value in checkpoint.get("step_results", {}).items()
+        }
+        pending = {s.id: s for s in plan.steps if s.id not in results}
+        confirmations: dict[str, dict] = {}
+        inflight: list[str] = []
+        final_step = checkpoint.get("final_step")
+        forced_status: str | None = None
+        executed = int(checkpoint.get("executed_steps", 0))
+
+        def snapshot() -> dict:
+            return {
+                "plan": asdict(plan),
+                "step_results": {key: asdict(value) for key, value in results.items()},
+                "pending_confirmations": list(confirmations.values()),
+                "inflight_steps": list(inflight),
+                "executed_steps": executed,
+                "llm_calls": self.control.llm_calls,
+                "active_elapsed": time.monotonic() - self.control.started,
+                "final_step": final_step,
+            }
+
+        def save() -> None:
+            if self.on_checkpoint:
+                self.on_checkpoint(snapshot())
+
+        try:
+            while pending:
+                self.control.check()
+                ready = [
+                    s
+                    for s in pending.values()
+                    if all(dep in results for dep in s.depends_on)
+                ]
+                if not ready:
+                    raise ValueError("Plan dependencies cannot be resolved")
+                executable: list[tuple[PlanStep, RunContext, list[dict]]] = []
+                for step in ready:
+                    if final_step:
+                        result = self._skipped_result(
+                            step, "earlier step produced final answer"
+                        )
+                    elif step.id in rejected:
+                        result = self._skipped_result(step, "user rejected action")
+                    elif any(results[d].status != "success" for d in step.depends_on):
+                        result = self._skipped_result(step, "dependency failed")
+                    elif not self.limits.allows_step(executed + len(executable)):
+                        result = self._skipped_result(step, "run step limit exceeded")
+                    else:
+                        result = None
+                    if result:
+                        results[step.id] = result
+                        pending.pop(step.id)
+                        self._record_event(
+                            "agent.skipped",
+                            {
+                                "step_id": step.id,
+                                "agent_id": step.agent_id,
+                                "reason": result.error,
+                            },
+                        )
+                        continue
+                    step_context, artifacts = self._dependency_context(
+                        step, context, results
+                    )
+                    verdict = self.authority_gate.before_dispatch(step)
+                    if verdict.action == GateAction.REFUSE:
+                        results[step.id] = self._failed_result(step, verdict.reason)
+                        pending.pop(step.id)
+                        self._record_event(
+                            "authority.refused",
+                            {
+                                "step_id": step.id,
+                                "agent_id": step.agent_id,
+                                "reason": verdict.reason,
+                            },
+                        )
+                        self._completion_event(results[step.id])
+                        continue
+                    fingerprint = action_fingerprint(
+                        step=step,
+                        context=step_context,
+                        adapter=self.adapters.get(step.agent_id),
+                        profile=self.agent_profiles.get(step.agent_id),
+                    )
+                    if (
+                        verdict.action == GateAction.REQUEST_CONFIRMATION
+                        and approvals.get(step.id) != fingerprint
+                    ):
+                        confirmations[step.id] = {
+                            "step_id": step.id,
+                            "agent_id": step.agent_id,
+                            "authority": step.authority.value,
+                            "task": step.task,
+                            "tools": step.tools,
+                            "arguments": {
+                                t: tool_kwargs_for(t, artifacts, step, step_context)
+                                for t in step.tools
+                            },
+                            "artifact_count": len(artifacts),
+                            "fingerprint": fingerprint,
+                            "workspace_dir": context.workspace_dir,
+                            "reason": verdict.reason,
+                            # What the environment will permit, so an
+                            # approval covers the boundary as well as the
+                            # intent.
+                            "sandbox": self.sandbox_policy.describe(step.authority),
+                        }
+                        self._record_event(
+                            "authority.requires_confirmation", confirmations[step.id]
+                        )
+                        continue
+                    confirmations.pop(step.id, None)
+                    executable.append((step, step_context, artifacts))
+                if not executable:
+                    save()
+                    if confirmations:
+                        break
+                    continue
+                # Persist BEFORE dispatch. A crash with in-flight effects is never
+                # automatically replayed by the application after restart.
+                inflight[:] = [s.id for s, _, _ in executable]
+                save()
+                parallel = [
+                    item
+                    for item in executable
+                    if item[0].can_run_parallel
+                    and item[0].authority == AuthorityTier.L1_READONLY
+                ]
+                sequential = [item for item in executable if item not in parallel]
+                if parallel:
+                    self._start_events([s for s, _, _ in parallel])
+                    with ThreadPoolExecutor(
+                        max_workers=max(1, min(self.max_parallel_steps, len(parallel)))
+                    ) as pool:
+                        futures = {
+                            pool.submit(self._execute_step, s, c, a): s
+                            for s, c, a in parallel
+                        }
+                        completed = {
+                            futures[f].id: f.result() for f in as_completed(futures)
+                        }
+                    for step, _, _ in parallel:
+                        results[step.id] = completed[step.id]
+                        pending.pop(step.id)
+                        inflight.remove(step.id)
+                        executed += 1
+                        self._completion_event(results[step.id])
+                        save()
+                for step, step_context, artifacts in sequential:
+                    self.control.check()
+                    self._start_events([step])
+                    results[step.id] = self._execute_step(step, step_context, artifacts)
+                    pending.pop(step.id)
+                    inflight.remove(step.id)
+                    executed += 1
+                    self._completion_event(results[step.id])
+                    save()
+                for result in results.values():
+                    if result.final and result.status == "success":
+                        if final_step != result.step_id:
+                            self._record_event(
+                                "run.short_circuit",
+                                {
+                                    "step_id": result.step_id,
+                                    "agent_id": result.agent_id,
+                                },
+                            )
+                        final_step = result.step_id
+                self.control.check()
+        except RunCancelled:
+            forced_status = "cancelled"
+            self._record_event("run.cancelled", {"reason": "user cancelled"})
+        except BudgetExceeded as exc:
+            forced_status = "failed"
+            self._record_event("run.failed", {"reason": str(exc)})
+        self._release_sandbox(owned_sandbox)
+        ordered = [results[s.id] for s in plan.steps if s.id in results]
+        raw_artifacts = [a for result in ordered for a in result.artifacts]
+        artifacts, conflicts = resolve_artifact_conflicts(raw_artifacts)
+        messages = [m for result in ordered for m in result.messages]
+        if forced_status:
+            confirmations.clear()
+        status = forced_status or (
+            "waiting_approval" if confirmations else self._run_status(results)
+        )
+        if final_step and not forced_status and not confirmations:
+            status = "success"
+        metrics = self._build_run_metrics(plan, results, artifacts)
+        metrics["total_cost_ms"] = int((time.monotonic() - started) * 1000)
+        self._record_event("run.metrics", metrics)
+        self._record_event(
+            "run.completed",
+            {
+                "status": status,
+                "conversation_id": context.conversation_id,
+                "agent_count": len(ordered),
+                "authority_tiers": {s.id: s.authority.value for s in plan.steps},
+                "artifact_count": len(artifacts),
+                "conflict_count": len(conflicts),
+                "pending_confirmation_steps": list(confirmations.values()),
+                "requires_user_confirmation": bool(confirmations),
+                "short_circuit_step": final_step,
+                "short_circuited": bool(final_step),
+            },
         )
         messages.append(
             self._summary_message(
                 plan_steps=plan.steps,
-                step_results=step_results,
+                step_results=results,
                 artifacts=artifacts,
                 conflicts=conflicts,
                 status=status,
-                short_circuited=early_final_step is not None,
+                short_circuited=bool(final_step),
             )
         )
-        stages = self.tracer.stages
-        self.debug_trace = stages
+        save()
+        self.debug_trace = self.tracer.stages
         return RunResult(
-            run_id=run_id,
+            run_id=self._current_run_id,
             status=status,
             conversation_id=context.conversation_id,
             messages=messages,
             artifacts=artifacts,
-            events=self.events,
-            debug_trace=stages,
+            events=list(self.events),
+            debug_trace=self.debug_trace,
+            checkpoint=snapshot(),
         )
 
+    def _validate_plan(self, plan: Plan) -> None:
+        ids = [s.id for s in plan.steps]
+        if len(set(ids)) != len(ids):
+            raise ValueError("Duplicate step ids")
+        for step in plan.steps:
+            if any(dep not in ids or dep == step.id for dep in step.depends_on):
+                raise ValueError("Unknown or self-referential dependency")
+            if step.kind not in {"input", "agent", "tool"}:
+                raise ValueError("Unsupported step kind")
+        remaining = {s.id: set(s.depends_on) for s in plan.steps}
+        done: set[str] = set()
+        while remaining:
+            ready = {key for key, deps in remaining.items() if deps <= done}
+            if not ready:
+                raise ValueError("Cyclic plan dependencies")
+            done.update(ready)
+            remaining = {
+                key: deps for key, deps in remaining.items() if key not in done
+            }
+
+    def _dependency_context(
+        self, step: PlanStep, context: RunContext, results: dict
+    ) -> tuple[RunContext, list[dict]]:
+        # Walk all ancestors so a review-only middle step does not erase source artifacts.
+        dependency_map = getattr(self, "_dependency_map", {})
+        ancestors = set()
+
+        def visit(dep):
+            if dep in ancestors:
+                return
+            for parent in dependency_map.get(dep, []):
+                visit(parent)
+            ancestors.add(dep)
+
+        for dep in step.depends_on:
+            visit(dep)
+        messages = [
+            m for dep in results if dep in ancestors for m in results[dep].messages
+        ]
+        artifacts = [
+            *context.upstream_artifacts,
+            *[a for dep in results if dep in ancestors for a in results[dep].artifacts],
+        ]
+        # Dependencies transfer exact artifact content; prompt compaction of chat
+        # history must not erase the code under review.
+        return replace(
+            context, history=[*context.history, *messages], upstream_artifacts=artifacts
+        ), artifacts
+
+    def _resolve_sandbox(
+        self, context: RunContext, plan: Plan
+    ) -> tuple[Sandbox | None, bool]:
+        """Bind the execution boundary this run's side effects must cross.
+
+        An injected sandbox is used as given — its creator owns the
+        lifetime. Otherwise the runner builds one from the run profile,
+        tightened to the strictest boundary the sandbox policy demands for
+        the plan's tiers, and owns it, which keeps a bare
+        ``HarnessRunner`` self-sufficient rather than silently
+        unsandboxed.
+        """
+        if self.sandbox is not None:
+            return self.sandbox, False
+        manager = self.sandbox_manager or SandboxManager()
+        boundary = self.sandbox_policy.strictest(s.authority for s in plan.steps)
+        spec = run_spec(
+            self._current_run_id,
+            conversation_id=context.conversation_id,
+            network=boundary.network,
+        )
+        return manager.create(spec), True
+
+    def _release_sandbox(self, owned: bool) -> None:
+        sandbox = self._active_sandbox
+        self._active_sandbox = None
+        if sandbox is None or not owned:
+            return
+        try:
+            report = sandbox.stop()
+        except Exception as exc:  # audit must never break a finished run
+            self._record_event("sandbox.report_failed", {"error": str(exc)})
+            return
+        self._record_event("sandbox.report", report.to_dict())
+
     def _execute_step(
-        self,
-        step: PlanStep,
-        context: RunContext,
-        prior_artifacts: list[dict],
+        self, step: PlanStep, context: RunContext, prior_artifacts: list[dict]
     ) -> StepExecutionResult:
-        with self.tracer.begin_stage(
-            step.id,
-            f"{step.agent_id}:{step.id}",
-        ) as stage:
+        with (
+            execution_scope(self.control, self._record_event),
+            sandbox_scope(self._active_sandbox),
+            self.tracer.begin_stage(step.id, f"{step.agent_id}:{step.id}") as stage,
+        ):
             stage.set_input(
                 {
                     "task": step.task,
                     "tools": step.tools,
-                    "depends_on": step.depends_on,
                     "authority": step.authority.value,
-                    "can_short_circuit": step.can_short_circuit,
                 }
             )
-
-            # Authority gate: refuse the step outright when the gate
-            # says so (e.g. L3 by default). The refusal still gets a
-            # trace stage so the decision is auditable.
-            gate_decision = self.authority_gate.before_dispatch(step)
-            stage.set_branch(f"authority.{gate_decision.action.value}")
-            if gate_decision.action is GateAction.REFUSE:
-                self._record_event(
-                    "authority.refused",
-                    {
-                        "step_id": step.id,
-                        "agent_id": step.agent_id,
-                        "authority": step.authority.value,
-                        "reason": gate_decision.reason,
-                    },
-                )
-                stage.set_error(gate_decision.reason)
-                return StepExecutionResult(
-                    step_id=step.id,
-                    agent_id=step.agent_id,
-                    status="failed",
-                    messages=[
-                        self._error_message(
-                            step.agent_id,
-                            f"Refused by authority gate: {gate_decision.reason}",
-                        )
-                    ],
-                    error=gate_decision.reason,
-                    authority=step.authority,
-                )
-
-            adapter = self.adapters.get(step.agent_id)
-            if adapter is None:
-                stage.set_error("adapter not found")
-                return self._failed_result(step, "adapter not found")
-
-            task = AgentTask(agent_id=step.agent_id, instruction=step.task, tools=step.tools)
+            if not self.agent_policy.allows(step.agent_id):
+                return self._failed_result(step, "agent is not allowed")
             try:
-                result = self._dispatch_adapter(adapter, task, step, context)
-                stage.set_raw_api(
-                    {"status": result.status, "artifact_count": len(result.artifacts)}
+                dynamic_artifacts, dynamic_errors, called_tools = [], [], set()
+                if step.kind == "input":
+                    return StepExecutionResult(step.id, step.agent_id, "success")
+                if step.kind == "tool":
+                    result = AgentResult(agent_id=step.agent_id)
+                else:
+                    adapter = self.adapters.get(step.agent_id)
+                    if adapter is None:
+                        return self._failed_result(step, "adapter not found")
+                    task = AgentTask(
+                        agent_id=step.agent_id, instruction=step.task, tools=step.tools
+                    )
+                    from agenthub.runtime.agent_runtime import tool_session
+
+                    safe_tools = [
+                        t
+                        for t in step.tools
+                        if infer_authority([t]) == AuthorityTier.L1_READONLY
+                        and tool_policy_for(
+                            self.agent_profiles.get(step.agent_id)
+                        ).allows(t)
+                    ]
+                    fields = {
+                        "ui_builder_tool": {"prompt": "string"},
+                        "workflow_builder_tool": {"prompt": "string"},
+                        "code_review_tool": {"code": "string"},
+                        "preview_tool": {"code": "string", "title": "string"},
+                    }
+                    schemas = [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "description": f"Run {name} for this task",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        k: {"type": v}
+                                        for k, v in fields.get(name, {}).items()
+                                    },
+                                    "additionalProperties": False,
+                                },
+                            },
+                        }
+                        for name in safe_tools
+                    ]
+
+                    def invoke(name, arguments):
+                        if name not in safe_tools:
+                            raise PermissionError(
+                                "Tool was not authorized in this plan"
+                            )
+                        if set(arguments) - set(fields.get(name, {})):
+                            raise ValueError("Unknown tool arguments")
+                        if any(
+                            not isinstance(v, str) or len(v) > 100000
+                            for v in arguments.values()
+                        ):
+                            raise ValueError("Invalid tool argument")
+                        proposed = replace(step, arguments={name: arguments})
+                        output, errors = self._execute_step_tools(
+                            [name],
+                            [*prior_artifacts, *dynamic_artifacts],
+                            proposed,
+                            context,
+                        )
+                        dynamic_artifacts.extend(output)
+                        dynamic_errors.extend(errors)
+                        called_tools.add(name)
+                        return {"artifacts": output, "errors": errors}
+
+                    with tool_session(schemas, invoke):
+                        result = self._dispatch_adapter(adapter, task, step, context)
+                    if result.status != "success":
+                        fallback = self.fallback.run(
+                            step.agent_id,
+                            task,
+                            context,
+                            result.error or "adapter failed",
+                        )
+                        if fallback:
+                            result = fallback
+                self.control.check()
+                artifacts = [
+                    *dynamic_artifacts,
+                    *[
+                        stamp_artifact(a, step.agent_id, step.id)
+                        for a in result.artifacts
+                    ],
+                ]
+                if result.status != "success":
+                    stage.set_error(result.error or "Agent failed")
+                    return StepExecutionResult(
+                        step.id,
+                        step.agent_id,
+                        "failed",
+                        result.messages,
+                        artifacts,
+                        result.error,
+                        authority=step.authority,
+                    )
+                tool_artifacts, errors = self._execute_step_tools(
+                    [t for t in step.tools if t not in called_tools],
+                    [*prior_artifacts, *artifacts],
+                    step,
+                    context,
                 )
+                errors = [*dynamic_errors, *errors]
+                artifacts.extend(tool_artifacts)
+                status = "failed" if errors else "success"
+                error = "; ".join(errors) if errors else None
+                messages = list(result.messages)
+                if error:
+                    stage.set_error(error)
+                    messages.append(self._error_message(step.agent_id, error))
+                final = (
+                    step.can_short_circuit
+                    and step.authority.auto_executable
+                    and status == "success"
+                )
+                stage.set_final(final)
+                stage.set_output({"artifact_count": len(artifacts), "status": status})
+                return StepExecutionResult(
+                    step.id,
+                    step.agent_id,
+                    status,
+                    messages,
+                    artifacts,
+                    error,
+                    final,
+                    step.authority,
+                )
+            except (RunCancelled, BudgetExceeded):
+                raise
             except Exception as exc:
-                stage.set_error(f"adapter raised: {exc}")
-                result = AgentResult(agent_id=step.agent_id, status="error", error=str(exc))
+                stage.set_error(str(exc))
+                return self._failed_result(step, str(exc))
 
-            if result.status != "success":
-                stage.set_branch("fallback")
-                fallback_result = self.fallback.run(
-                    step.agent_id, task, context, result.error or "adapter failed"
-                )
-                if fallback_result is not None and fallback_result.status == "success":
-                    result = fallback_result
-
-            step_artifacts = [
-                stamp_artifact(artifact, step.agent_id, step.id)
-                for artifact in result.artifacts
-            ]
-
-            # Tool failures no longer abort the step. We collect what
-            # we got and let the rest of the tools run.
-            tool_artifacts: list[dict] = []
-            tool_errors: list[str] = []
-            tool_artifacts, tool_errors = self._execute_step_tools(
-                step.tools,
-                [*prior_artifacts, *step_artifacts],
-                step,
-                context,
-            )
-            if tool_errors:
-                stage.set_error("; ".join(tool_errors))
-
-            status = "success" if result.status == "success" else "failed"
-            messages = result.messages or [
-                self._error_message(step.agent_id, result.error or "Agent execution failed")
-            ]
-
-            # IsFinal decision: only L1 auto-executable steps with
-            # ``can_short_circuit=True`` may end the run early. L2/L3
-            # need human confirmation, so they never short-circuit
-            # even if the planner asks for it.
-            can_short_circuit = (
-                step.can_short_circuit and step.authority.auto_executable and status == "success"
-            )
-
-            stage.set_output(
-                {
-                    "message_count": len(messages),
-                    "artifact_count": len(step_artifacts) + len(tool_artifacts),
-                    "tool_error_count": len(tool_errors),
-                    "final": can_short_circuit,
-                }
-            )
-            if can_short_circuit:
-                stage.set_final(True, reason=f"{step.agent_id} produced conclusive answer")
-
-            return StepExecutionResult(
-                step_id=step.id,
-                agent_id=step.agent_id,
-                status=status,
-                messages=messages,
-                artifacts=[*step_artifacts, *tool_artifacts],
-                error=result.error,
-                final=can_short_circuit,
-                authority=step.authority,
-            )
-
-    def _maybe_emit_confirmation(self, step: PlanStep, result: StepExecutionResult) -> None:
-        """Consult the authority gate and emit the confirmation event.
-
-        The article frames L2 as "model can suggest, human decides". The
-        default gate asks for confirmation on every L2 success; a
-        stricter gate (or a future override) can flip that decision
-        without touching this method.
-        """
-
-        if result.status != "success":
-            return
-        decision = self.authority_gate.after_dispatch(step, _agent_result_for(result))
-        if decision.action is not GateAction.REQUEST_CONFIRMATION:
-            return
-        self._record_event(
-            "authority.requires_confirmation",
-            {
-                "step_id": step.id,
-                "agent_id": step.agent_id,
-                "authority": step.authority.value,
-                "task": step.task,
-                "artifact_count": len(result.artifacts),
-                "reason": decision.reason,
-            },
-        )
-        # Persist the pending decision so the API layer can list
-        # confirmations without re-parsing the run trace. The call is
-        # import-local so the harness stays usable without the FastAPI
-        # app (and its service module) being on the path.
-        try:
-            from app.api.services.decision_service import upsert_pending
-
-            upsert_pending(
-                run_id=self._current_run_id,
-                step_id=step.id,
-                agent_id=step.agent_id,
-                authority=step.authority.value,
-                task=step.task,
-                artifact_count=len(result.artifacts),
-            )
-        except Exception:  # pragma: no cover - persistence is best-effort
-            # Tests / offline use should not break the harness over a
-            # missing service. The event stream still carries the full
-            # payload so the API can rebuild state if needed.
-            pass
-
-    def _dispatch_adapter(
-        self,
-        adapter: AgentAdapter,
-        task: AgentTask,
-        step: PlanStep,
-        context: RunContext,
-    ) -> AgentResult:
-        """Route an adapter call through the gateway.
-
-        The default :class:`NoopGateway` is a pass-through, so callers
-        that do not opt in pay nothing. When a real cache or signer is
-        injected, this is the single place that knows about it.
-        """
-
-        from agenthub.gateway.gateway import GatewayDispatch
-
-        return self.gateway.dispatch(
+    def _dispatch_adapter(self, adapter, task, step, context) -> AgentResult:
+        result = self.gateway.dispatch(
             adapter,
             GatewayDispatch(
                 endpoint=f"adapter:{step.agent_id}",
                 task=task,
                 context=context,
-                cache_ttl_seconds=0,
+                cache_ttl_seconds=300
+                if getattr(adapter, "cacheable", False)
+                and not step.tools
+                and step.authority.auto_executable
+                else 0,
             ),
         )
+        if result.metrics.get("cache_hit"):
+            self._record_event(
+                "cache.hit", {"step_id": step.id, "agent_id": step.agent_id}
+            )
+        return result
 
     def _execute_step_tools(
-        self,
-        tool_ids: list[str],
-        artifacts: list[dict],
-        step: PlanStep,
-        context: RunContext,
+        self, tool_ids, artifacts, step, context
     ) -> tuple[list[dict], list[str]]:
-        tool_artifacts: list[dict] = []
+        produced: list[dict] = []
         errors: list[str] = []
         policy = tool_policy_for(self.agent_profiles.get(step.agent_id))
         for tool_id in tool_ids:
+            self.control.check()
             with self.tracer.begin_stage(
-                f"{step.id}.{tool_id}",
-                f"Tool {tool_id}",
-            ) as tool_stage:
-                tool_stage.set_input({"tool_id": tool_id, "step_id": step.id})
+                f"{step.id}.{tool_id}", f"tool:{tool_id}"
+            ) as stage:
                 try:
                     ensure_tool_allowed(step.agent_id, tool_id, policy)
-                    kwargs = tool_kwargs_for(tool_id, artifacts, step, context)
-                except Exception as exc:
-                    msg = f"{tool_id}: {exc}"
-                    errors.append(msg)
+                    kwargs = tool_kwargs_for(
+                        tool_id, [*artifacts, *produced], step, context
+                    )
                     self._record_event(
-                        "tool.failed",
+                        "tool.started",
                         {
                             "step_id": step.id,
                             "agent_id": step.agent_id,
                             "tool_id": tool_id,
-                            "error": str(exc),
+                            "argument_keys": sorted(kwargs),
                         },
                     )
-                    tool_stage.set_error(msg)
-                    continue
-
-                self._record_event(
-                    "tool.started",
-                    {
-                        "step_id": step.id,
-                        "agent_id": step.agent_id,
-                        "tool_id": tool_id,
-                        "argument_keys": sorted(kwargs),
-                    },
-                )
-                try:
                     result = self.tool_executor.execute(tool_id, **kwargs)
+                    self.control.check()
+                    produced.append(
+                        stamp_artifact(
+                            tool_result_to_artifact(result), step.agent_id, step.id
+                        )
+                    )
+                    self._record_event(
+                        "tool.completed",
+                        {
+                            "step_id": step.id,
+                            "agent_id": step.agent_id,
+                            "tool_id": tool_id,
+                            "artifact_type": result.type,
+                            "artifact_title": result.title,
+                        },
+                    )
+                    stage.set_output({"artifact_type": result.type})
+                except (RunCancelled, BudgetExceeded):
+                    raise
                 except Exception as exc:
-                    msg = f"{tool_id}: {exc}"
-                    errors.append(msg)
+                    errors.append(f"{tool_id}: {exc}")
+                    stage.set_error(str(exc))
                     self._record_event(
                         "tool.failed",
                         {
@@ -581,231 +759,129 @@ class HarnessRunner:
                             "error": str(exc),
                         },
                     )
-                    tool_stage.set_error(msg)
-                    continue
+        return produced, errors
 
-                self._record_event(
-                    "tool.completed",
-                    {
-                        "step_id": step.id,
-                        "agent_id": step.agent_id,
-                        "tool_id": tool_id,
-                        "artifact_type": result.type,
-                        "artifact_title": result.title,
-                    },
-                )
-                tool_stage.set_output(
-                    {"artifact_type": result.type, "artifact_title": result.title}
-                )
-                tool_artifacts.append(
-                    stamp_artifact(
-                        tool_result_to_artifact(result), step.agent_id, step.id
-                    )
-                )
-        return tool_artifacts, errors
-
-    def _failed_result(self, step: PlanStep, reason: str) -> StepExecutionResult:
+    def _failed_result(self, step, reason):
         return StepExecutionResult(
-            step_id=step.id,
-            agent_id=step.agent_id,
-            status="failed",
-            messages=[self._error_message(step.agent_id, reason)],
+            step.id,
+            step.agent_id,
+            "failed",
+            [self._error_message(step.agent_id, reason)],
             error=reason,
             authority=step.authority,
         )
 
-    def _skipped_result(self, step: PlanStep, reason: str) -> StepExecutionResult:
+    def _skipped_result(self, step, reason):
         return StepExecutionResult(
-            step_id=step.id,
-            agent_id=step.agent_id,
-            status="skipped",
-            messages=[self._error_message(step.agent_id, f"Skipped: {reason}")],
-            error=reason,
-            authority=step.authority,
+            step.id, step.agent_id, "skipped", error=reason, authority=step.authority
         )
 
-    def _error_message(self, sender: str, content: str) -> dict:
-        return {"role": "agent", "sender": sender, "content": content, "format": "markdown"}
+    def _error_message(self, sender, content):
+        return {
+            "role": "agent",
+            "sender": sender,
+            "content": content,
+            "format": "markdown",
+        }
 
-    def _start_events(self, steps: list[PlanStep]) -> list[RunEvent]:
-        event_type = "agent.parallel_started" if len(steps) > 1 else "agent.started"
+    def _start_events(self, steps):
         return [
             self._record_event(
-                event_type,
+                "agent.parallel_started" if len(steps) > 1 else "agent.started",
                 {
-                    "step_id": step.id,
-                    "agent_id": step.agent_id,
-                    "task": step.task,
-                    "depends_on": step.depends_on,
-                    "authority": step.authority.value,
+                    "step_id": s.id,
+                    "agent_id": s.agent_id,
+                    "task": s.task,
+                    "tools": s.tools,
+                    "authority": s.authority.value,
                 },
             )
-            for step in steps
+            for s in steps
         ]
 
-    def _completion_event(self, result: StepExecutionResult) -> RunEvent:
+    def _completion_event(self, result):
         return self._record_event(
             "agent.completed",
             {
                 "step_id": result.step_id,
                 "agent_id": result.agent_id,
                 "status": result.status,
-                "artifact_count": len(result.artifacts),
                 "error": result.error,
-                "final": result.final,
+                "requires_user_confirmation": False,
+                "artifact_count": len(result.artifacts),
                 "authority": result.authority.value,
-                "requires_user_confirmation": result.authority != AuthorityTier.L1_READONLY,
+                "final": result.final,
             },
         )
 
-    def _record_event(self, event_type: str, payload: dict) -> RunEvent:
-        event = RunEvent(type=event_type, payload=payload)
-        self.events.append(event)
-        return event
+    def _record_event(self, event_type, payload) -> RunEvent:
+        with self._event_lock:
+            event = RunEvent(event_type, payload)
+            self.events.append(event)
+            self.tracer.record_lifecycle(event_type, event_type, payload)
+            if self.on_event:
+                self.on_event(event)
+            return event
 
-    def _build_run_metrics(
-        self,
-        plan: Plan,
-        step_results: dict[str, "StepExecutionResult"],
-        artifacts: list[dict],
-    ) -> dict[str, Any]:
-        """Aggregate monitoring counters for one completed run.
-
-        Emitted alongside ``run.completed`` so dashboards and the trace
-        panel can render consistent counters without re-parsing every
-        stage. Counters are intentionally cheap — no per-step cost
-        detail, just the roll-up needed to spot regressions.
-        """
-
-        stages = self.tracer.stages
-        stage_costs = [stage.cost_ms for stage in stages if stage.cost_ms]
-        statuses = [result.status for result in step_results.values()]
-        authority_counts: dict[str, int] = {}
-        for result in step_results.values():
-            authority_counts[result.authority.value] = (
-                authority_counts.get(result.authority.value, 0) + 1
-            )
-        agent_counts: dict[str, int] = {}
-        for step in plan.steps:
-            agent_counts[step.agent_id] = agent_counts.get(step.agent_id, 0) + 1
-        cache_hits = sum(
-            1 for stage in stages if stage.outputs.get("cache_hit") is True
-        )
+    def _build_run_metrics(self, plan, step_results, artifacts):
+        statuses = [r.status for r in step_results.values()]
+        tiers: dict[str, int] = {}
+        agents: dict[str, int] = {}
+        for r in step_results.values():
+            tiers[r.authority.value] = tiers.get(r.authority.value, 0) + 1
+            if r.status != "skipped":
+                agents[r.agent_id] = agents.get(r.agent_id, 0) + 1
+        usage = [
+            e.payload.get("usage", {}) for e in self.events if e.type == "llm.completed"
+        ]
         return {
-            "run_id": self._current_run_id or "",
+            "run_id": self._current_run_id,
             "steps_planned": len(plan.steps),
             "steps_succeeded": statuses.count("success"),
             "steps_failed": statuses.count("failed"),
-            "steps_short_circuited": sum(
-                1 for stage in stages if stage.final
-            ),
-            "llm_calls": sum(
-                1 for stage in stages if stage.stage_name.startswith("llm.")
-            ),
-            "cache_hits": cache_hits,
+            "steps_skipped": statuses.count("skipped"),
+            "steps_short_circuited": sum(r.final for r in step_results.values()),
+            "llm_calls": sum(e.type == "llm.started" for e in self.events),
+            "cache_hits": sum(e.type == "cache.hit" for e in self.events),
+            "prompt_tokens": sum(int(u.get("prompt_tokens", 0)) for u in usage),
+            "completion_tokens": sum(int(u.get("completion_tokens", 0)) for u in usage),
             "artifact_count": len(artifacts),
-            "total_cost_ms": sum(stage_costs),
-            "max_stage_cost_ms": max(stage_costs) if stage_costs else 0,
-            "authority_tier_counts": authority_counts,
-            "agent_call_counts": agent_counts,
+            "total_cost_ms": 0,
+            "max_stage_cost_ms": max(
+                (s.cost_ms for s in self.tracer.stages), default=0
+            ),
+            "authority_tier_counts": tiers,
+            "agent_call_counts": agents,
         }
 
-    def _run_status(self, results: dict[str, StepExecutionResult]) -> str:
-        if not results:
+    def _run_status(self, results):
+        statuses = {r.status for r in results.values()}
+        if not statuses or statuses == {"success"}:
             return "success"
-        statuses = {result.status for result in results.values()}
-        if statuses == {"success"}:
-            return "success"
-        if "success" in statuses:
-            return "partial_success"
-        return "failed"
+        return "partial_success" if "success" in statuses else "failed"
 
     def _summary_message(
         self,
         *,
-        plan_steps: list[PlanStep],
-        step_results: dict[str, StepExecutionResult],
-        artifacts: list[dict],
-        conflicts: list[object],
-        status: str,
-        short_circuited: bool,
-    ) -> dict:
-        agent_lines: list[str] = []
+        plan_steps,
+        step_results,
+        artifacts,
+        conflicts,
+        status,
+        short_circuited=False,
+    ):
+        lines = [
+            "Orchestrator summary",
+            f"Status: {status}",
+            f"Artifacts: {len(artifacts)}; conflicts: {len(conflicts)}",
+        ]
         for step in plan_steps:
             result = step_results.get(step.id)
-            state = result.status if result else "pending"
-            tier = result.authority.value if result else step.authority.value
-            final_tag = " (final)" if result and result.final else ""
-            detail = f"- {step.agent_id} [{tier}]: {state}{final_tag}"
-            if result and result.error:
-                detail = f"{detail} ({result.error})"
-            agent_lines.append(detail)
-
-        artifact_lines = [
-            f"- {artifact.get('type', 'artifact')}: {artifact.get('title') or artifact.get('id')}"
-            for artifact in artifacts[:8]
-        ]
-        if len(artifacts) > 8:
-            artifact_lines.append(f"- ... {len(artifacts) - 8} more artifacts")
-
-        authority_tiers = sorted({r.authority.value for r in step_results.values()})
-        l2_or_l3 = [t for t in authority_tiers if t in {"L2", "L3"}]
-        pending_steps = [
-            f"{result.agent_id} ({result.authority.value})"
-            for result in step_results.values()
-            if result.status == "success"
-            and result.authority != AuthorityTier.L1_READONLY
-        ]
-
-        content = [
-            "Orchestrator summary",
-            "",
-            f"- Status: {status}",
-            f"- Agents completed: {len(step_results)}",
-            f"- Artifacts: {len(artifacts)}",
-            f"- Conflicts: {len(conflicts)}",
-            f"- Short-circuited: {short_circuited}",
-            f"- Authority tiers touched: {', '.join(authority_tiers) or 'none'}",
-        ]
-        if agent_lines:
-            content.extend(["", "Agent results:", *agent_lines])
-        if artifact_lines:
-            content.extend(["", "Artifacts produced:", *artifact_lines])
-        if conflicts:
-            content.append("")
-            content.append("Conflict artifacts were emitted so you can compare candidates before applying changes.")
-        if pending_steps:
-            content.append("")
-            content.append(
-                "Awaiting your confirmation for: " + ", ".join(pending_steps)
+            lines.append(
+                f"- {step.agent_id}: {result.status if result else 'awaiting approval/dependency'}"
             )
-        elif l2_or_l3:
-            content.append("")
-            content.append(
-                "L2/L3 actions emitted suggestions only — review the affected "
-                "cards and confirm before applying."
+        if status == "waiting_approval":
+            lines.append(
+                "Review the pending action and confirm to continue. It has not executed."
             )
-        content.append("")
-        content.append("Review the inline cards below this message or open the artifact panel for details.")
-        return {
-            "role": "agent",
-            "sender": "orchestrator",
-            "content": "\n".join(content),
-            "format": "markdown",
-        }
-
-
-def _agent_result_for(result: StepExecutionResult) -> AgentResult:
-    """Adapt a :class:`StepExecutionResult` into an :class:`AgentResult`
-    so the gate's ``after_dispatch`` signature stays stable.
-
-    Only the fields the gate actually inspects (status, agent_id,
-    error) are populated. The remaining fields fall back to safe
-    defaults so the gate never has to special-case None.
-    """
-
-    return AgentResult(
-        agent_id=result.agent_id,
-        status=result.status,
-        error=result.error,
-    )
+        return self._error_message("orchestrator", chr(10).join(lines))
